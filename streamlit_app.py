@@ -397,7 +397,8 @@ st.markdown(
         .source-badge { display: inline-flex; }
         [data-testid="stSegmentedControl"] button { min-height: 2.8rem; font-size: .76rem !important; }
         .section-heading { margin-top: 1.3rem; }
-        .ranking-scroll { overflow: visible; border: 0; background: transparent; box-shadow: none; }
+        .ranking-scroll { max-width: 100%; overflow-x: clip; overflow-y: visible; border: 0; background: transparent; box-shadow: none; }
+        .ranking-table { width: 100%; min-width: 0; max-width: 100%; }
         .ranking-table tbody tr {
             gap: .15rem .8rem;
             margin-bottom: .8rem;
