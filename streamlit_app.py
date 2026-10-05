@@ -116,9 +116,9 @@ st.markdown(
     .section-title { margin-top: .3rem; color: var(--ink); font-family: 'DM Sans', sans-serif; font-size: 1.35rem; font-weight: 700; letter-spacing: -.035em; }
     
     /* Table Desktop */
-    .ranking-scroll { width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow-card); }
-    .ranking-table { width: 100%; min-width: 940px; border-collapse: separate; border-spacing: 0; }
-    .ranking-table th { position: sticky; top: 0; z-index: 1; color: #dce9f5; background: #15364f; text-align: left; text-transform: uppercase; font-size: .64rem; font-weight: 700; letter-spacing: .12em; padding: 1rem 1.1rem; border-bottom: 1px solid #315a80; border-color: rgba(188, 236, 223, .16); white-space: nowrap; }
+    .ranking-scroll { width: 100%; overflow-x: auto; overflow-y: auto; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow-card); }
+    .ranking-table { width: 100%; min-width: 1250px; border-collapse: separate; border-spacing: 0; }
+    .ranking-table th { position: sticky; top: 0; z-index: 1; color: #dce9f5; background: #15364f; text-align: center; text-transform: uppercase; font-size: .64rem; font-weight: 700; letter-spacing: .12em; padding: 1rem 1.1rem; border-bottom: 1px solid #315a80; border-color: rgba(188, 236, 223, .16); white-space: nowrap; }
     .ranking-table th:first-child { padding-left: 1.2rem; border-top-left-radius: 16px; }
     .ranking-table th:last-child { border-top-right-radius: 16px; }
     .ranking-table td { padding: 1rem 1.1rem; border-bottom: 1px solid var(--line); font-size: .84rem; line-height: 1.5; vertical-align: middle; color: var(--ink); }
@@ -465,7 +465,7 @@ st.markdown(
                 <span class="brand-divider"></span></div>
             <div class="masthead-body"><div>
                 <div class="masthead-title">Classement des SCPI</div>
-                <div class="masthead-lede">Un classement transparent selon plusieurs profils d’investissement</div>
+                <div class="masthead-lede">Selon plusieurs profils d’investissement</div>
             </div><div class="masthead-tools">
                 <a class="refresh-action" href="{html.escape(refresh_url, quote=True)}" title="Télécharger à nouveau les données du Google Sheet">Actualiser</a>
                 <span class="source-badge">{masthead_status}</span>
@@ -601,8 +601,10 @@ else:
         scpi_id = quote(str(item.get("scpi_id", "")), safe="")
         discount_value = item.get("discount", "").strip()
         discount = html.escape(display_percent(discount_value))
+
+        pga = html.escape(display_percent(item.get("pga", "")))
+        tri = html.escape(display_percent(item.get("tri", "")))
         
-        # Données Nue Propriété formatées systématiquement
         tri_nue_propriete = html.escape(display_percent(item.get("tri_demembrement", "")))
         duree_nue_propriete = str(item.get("duree_tri_demembrement", "")).strip()
         if duree_nue_propriete and not duree_nue_propriete.lower().endswith("ans"):
@@ -615,6 +617,8 @@ else:
             f"<td class='cell-scpi' data-label='SCPI'><a class='company-link' href='?scpi={scpi_id}'>{scpi_name}</a></td>",
             f"<td class='cell-score' data-label='Note / 100'><span class='score-pill {score_class}'>{score:.1f}</span></td>",
             f"<td class='cell-badge' data-label='Décote'><span class='discount-value'>{discount}</span></td>",
+            f"<td class='cell-badge' data-label='PGA'><span class='discount-value'>{pga}</span></td>",
+            f"<td class='cell-badge' data-label='TRI'><span class='discount-value'>{tri}</span></td>",
             f"<td class='cell-badge' data-label='Secteurs majoritaires'><span class='data-chip'>{html.escape(item.get('main_sectors', '—'))}</span></td>",
             f"<td class='cell-badge' data-label='Régions majoritaires'><span class='data-chip'>{html.escape(item.get('main_regions', '—'))}</span></td>",
             f"<td class='cell-badge cell-np' data-label='TRI Max Nue Propriété'><span class='discount-value'>{tri_nue_propriete}</span></td>",
@@ -624,7 +628,6 @@ else:
         
         table_rows.append("<tr>" + "".join(row_cells) + "</tr>")
     
-    # Message si aucune SCPI ne correspond à la recherche
     if not table_rows:
         table_rows.append(
             "<tr><td colspan='9' style='text-align: center; padding: 3rem 1rem; color: var(--muted); font-size: 1rem; border-bottom: none;'>"
@@ -633,9 +636,9 @@ else:
         
     st.markdown(
         "<div class='ranking-scroll'><table class='ranking-table'><thead><tr><th>Place</th><th>SCPI</th>"
-        "<th>Note / 100</th><th>Décote</th><th>Secteurs majoritaires</th>"
-        "<th>Régions majoritaires</th><th>TRI Max Nue Propriété</th><th>Durée TRI Max Nue Propriété</th>"
-        "<th>Bonus Louve (cashback)</th></tr></thead><tbody>"
+        "<th>Note / 100</th><th>Décote</th><th>PGA</th><th>TRI</th><th>Secteurs<br>majoritaires</th>"
+        "<th>Régions<br>majoritaires</th><th>TRI Max<br>Nue Propriété</th><th>Durée TRI Max<br>Nue Propriété</th>"
+        "<th>Bonus Louve<br>(cashback)</th></tr></thead><tbody>"
         + "".join(table_rows)
         + "</tbody></table></div>",
         unsafe_allow_html=True,
