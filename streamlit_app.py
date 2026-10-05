@@ -9,6 +9,13 @@ from typing import Any
 import extra_streamlit_components as stx
 import streamlit as st
 
+# 
+try:
+    from st_keyup import st_keyup
+    HAS_KEYUP = True
+except ImportError:
+    HAS_KEYUP = False
+
 from scpi_data import (
     CATEGORY_ORDER,
     PROFILE_ORDER,
@@ -549,7 +556,8 @@ elif selected_scpi is not None:
         unsafe_allow_html=True,
     )
 else:
-    col_heading, col_search = st.columns([1.5, 0.5])
+    # Header du tableau avec la barre de recherche intelligente
+    col_heading, col_search = st.columns([1.5, 1])
     with col_heading:
         st.markdown(
             f"<div class='section-heading' style='margin-top: 0.5rem; margin-bottom: 0.5rem;'><div><div class='section-kicker'>{html.escape(profile)}</div>"
@@ -557,11 +565,19 @@ else:
             unsafe_allow_html=True,
         )
     with col_search:
-        search_query = st.text_input(
-            "Recherche",
-            placeholder="🔍 Rechercher une SCPI...",
-            label_visibility="collapsed"
-        )
+        if HAS_KEYUP:
+            search_query = st_keyup(
+                "Recherche",
+                placeholder="🔍 Rechercher une SCPI...",
+                label_visibility="collapsed",
+                debounce=250 
+            )
+        else:
+            search_query = st.text_input(
+                "Recherche",
+                placeholder="🔍 Rechercher une SCPI... (Appuyez sur Entrée)",
+                label_visibility="collapsed"
+            )
     st.markdown("<div style='margin-bottom: 1rem;'></div>", unsafe_allow_html=True)
     
     table_rows = []

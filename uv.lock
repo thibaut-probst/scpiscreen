@@ -46,21 +46,6 @@ wheels = [
 ]
 
 [[package]]
-name = "blank-app-template"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "extra-streamlit-components" },
-    { name = "streamlit" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "extra-streamlit-components", specifier = ">=0.1.81" },
-    { name = "streamlit", specifier = ">=1.61.1" },
-]
-
-[[package]]
 name = "certifi"
 version = "2026.4.22"
 source = { registry = "https://pypi.org/simple" }
@@ -517,6 +502,23 @@ wheels = [
 ]
 
 [[package]]
+name = "scpiscreen"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "extra-streamlit-components" },
+    { name = "streamlit" },
+    { name = "streamlit-keyup" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "extra-streamlit-components", specifier = ">=0.1.81" },
+    { name = "streamlit", specifier = ">=1.61.1" },
+    { name = "streamlit-keyup", specifier = ">=0.2.4" },
+]
+
+[[package]]
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -566,6 +568,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ce/98/399d9b5bea64f0db9a37a800e420ba563dcde293e91d244c7d96acaeb313/streamlit-1.64.0.tar.gz", hash = "sha256:5c3f9a9dec13b5c5197a9c764ebf1a9d77f9e19c1b4af008779cb45c368961a3", size = 9535360, upload-time = "2026-09-15T19:13:53.576Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/8e/e635448a7fd6d92211d4ff2150356b8dffd3fcdc05c00511c61110078871/streamlit-1.64.0-py3-none-any.whl", hash = "sha256:4daf63aa9eaa5452d0edc64a5bdb0c4ad25580fe3c62c270455f3c43e9db5098", size = 10093987, upload-time = "2026-09-15T19:13:51.284Z" },
+]
+
+[[package]]
+name = "streamlit-keyup"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "streamlit" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/78/ae/4421ee93439fb9f6a9dab2e8b4851713629c26092e2585d1d66d5ca5798e/streamlit_keyup-1.0.0.tar.gz", hash = "sha256:1ebda9aa4c715357b6a7abeb7328bcddde1175b905b88035cc4192df6c9ca535", size = 6875, upload-time = "2026-08-19T12:54:24.098Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/75/a7/a3be6f2ecd236a6417fffd95c879787c4f90da4924b914f49fe25af93612/streamlit_keyup-1.0.0-py3-none-any.whl", hash = "sha256:1a01fe6ec17f51cab6f95843249a0cf2fab7e8cfb79fdab3ca761f8b83c24291", size = 7190, upload-time = "2026-08-19T12:54:23.176Z" },
 ]
 
 [[package]]
