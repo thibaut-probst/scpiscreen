@@ -281,7 +281,7 @@ st.markdown(
 
 ACCESS_CODE = os.environ.get("SCPISCREEN_ACCESS_CODE", "")
 AUTH_COOKIE_NAME = "scpiscreen_access"
-AUTH_COOKIE_TTL_SECONDS = 365 * 24 * 60 * 60
+AUTH_COOKIE_TTL_SECONDS = 30 * 24 * 60 * 60
 
 if len(ACCESS_CODE) < 16:
     st.error(
@@ -468,7 +468,6 @@ st.markdown(
         unsafe_allow_html=True,
 )
 
-# Retrait de l'option "Nue Propriété", on garde uniquement la colonne du profil pour l'esthétique
 profile_column, empty_column = st.columns([1.7, 1.3])
 with profile_column:
         st.markdown('<div class="profile-label">Profil d’investissement</div>', unsafe_allow_html=True)
@@ -550,13 +549,31 @@ elif selected_scpi is not None:
         unsafe_allow_html=True,
     )
 else:
-    st.markdown(
-        f"<div class='section-heading'><div><div class='section-kicker'>{html.escape(profile)}</div>"
-        "<div class='section-title'>Classement complet</div></div></div>",
-        unsafe_allow_html=True,
-    )
+    col_heading, col_search = st.columns([1.5, 0.5])
+    with col_heading:
+        st.markdown(
+            f"<div class='section-heading' style='margin-top: 0.5rem; margin-bottom: 0.5rem;'><div><div class='section-kicker'>{html.escape(profile)}</div>"
+            "<div class='section-title'>Classement complet</div></div></div>",
+            unsafe_allow_html=True,
+        )
+    with col_search:
+        search_query = st.text_input(
+            "Recherche",
+            placeholder="🔍 Rechercher une SCPI...",
+            label_visibility="collapsed"
+        )
+    st.markdown("<div style='margin-bottom: 1rem;'></div>", unsafe_allow_html=True)
+    
     table_rows = []
+    search_q = search_query.strip().lower() if search_query else ""
+    
     for rank, item in enumerate(rankings, start=1):
+        scpi_name = html.escape(item.get("name", "SCPI"))
+        
+        # Filtre de recherche
+        if search_q and search_q not in scpi_name.lower():
+            continue
+            
         score = item["profile_scores"].get(profile, 0)
         score_class = (
             "category-green-vivid" if score >= 70 else
@@ -566,7 +583,6 @@ else:
             "category-red"
         )
         scpi_id = quote(str(item.get("scpi_id", "")), safe="")
-        scpi_name = html.escape(item.get("name", "SCPI"))
         discount_value = item.get("discount", "").strip()
         discount = html.escape(display_percent(discount_value))
         
@@ -591,6 +607,13 @@ else:
         ]
         
         table_rows.append("<tr>" + "".join(row_cells) + "</tr>")
+    
+    # Message si aucune SCPI ne correspond à la recherche
+    if not table_rows:
+        table_rows.append(
+            "<tr><td colspan='9' style='text-align: center; padding: 3rem 1rem; color: var(--muted); font-size: 1rem; border-bottom: none;'>"
+            "Aucune SCPI ne correspond à votre recherche.</td></tr>"
+        )
         
     st.markdown(
         "<div class='ranking-scroll'><table class='ranking-table'><thead><tr><th>Place</th><th>SCPI</th>"
