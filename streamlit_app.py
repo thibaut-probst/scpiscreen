@@ -5,11 +5,10 @@ import os
 import time
 from urllib.parse import quote, urlencode
 from typing import Any
-
+import streamlit.components.v1 as components
 import extra_streamlit_components as stx
 import streamlit as st
 
-# 
 try:
     from st_keyup import st_keyup
     HAS_KEYUP = True
@@ -26,14 +25,12 @@ from scpi_data import (
     load_google_sheet,
 )
 
-
 st.set_page_config(
     page_title="SCPIScreen",
     page_icon="◉",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
 
 st.markdown(
     """
@@ -118,7 +115,8 @@ st.markdown(
     /* Table Desktop */
     .ranking-scroll { width: 100%; overflow-x: auto; overflow-y: auto; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow-card); }
     .ranking-table { width: 100%; min-width: 1250px; border-collapse: separate; border-spacing: 0; }
-    .ranking-table th { position: sticky; top: 0; z-index: 1; color: #dce9f5; background: #15364f; text-align: center; text-transform: uppercase; font-size: .64rem; font-weight: 700; letter-spacing: .12em; padding: 1rem 1.1rem; border-bottom: 1px solid #315a80; border-color: rgba(188, 236, 223, .16); white-space: nowrap; }
+    .ranking-table th { position: sticky; top: 0; z-index: 1; color: #dce9f5; background: #15364f; text-align: center; text-transform: uppercase; font-size: .64rem; font-weight: 700; letter-spacing: .12em; padding: 1rem 1.1rem; border-bottom: 1px solid #315a80; border-color: rgba(188, 236, 223, .16); white-space: nowrap; transition: background-color 0.2s ease; cursor: pointer; user-select: none; }
+    .ranking-table th:hover { background: #1a4261; }
     .ranking-table th:first-child { padding-left: 1.2rem; border-top-left-radius: 16px; }
     .ranking-table th:last-child { border-top-right-radius: 16px; }
     .ranking-table td { padding: 1rem 1.1rem; border-bottom: 1px solid var(--line); font-size: .84rem; line-height: 1.5; vertical-align: middle; color: var(--ink); }
@@ -168,6 +166,7 @@ st.markdown(
     html[data-theme="dark"] .stApp { background: radial-gradient(ellipse at 5% 0%, rgba(63, 181, 151, .08), transparent 35rem), var(--paper); }
     html[data-theme="dark"] [data-testid="stHeader"] { background: rgba(16, 27, 36, .9); }
     html[data-theme="dark"] .ranking-table th { background: #15364a; }
+    html[data-theme="dark"] .ranking-table th:hover { background: #1c4660; }
     html[data-theme="dark"] .ranking-table td { border-color: #30424e; }
     html[data-theme="dark"] .ranking-table tbody tr:hover { background: #203a42; }
     html[data-theme="dark"] .data-chip { border-color: var(--line); background: #203640; color: #d7e5e7; }
@@ -201,7 +200,7 @@ st.markdown(
         .masthead-title { font-size: clamp(1.8rem, 8vw, 2.35rem); }
         .masthead-lede { font-size: .88rem; }
         .masthead-tools { flex-wrap: wrap; }
-        .source-badge { display: none; } /* Hide badge on mobile */
+        .source-badge { display: none; }
         [data-testid="stSegmentedControl"] button { min-height: 2.8rem; font-size: .76rem !important; }
         .section-heading { margin-top: 1.3rem; }
         
@@ -257,15 +256,8 @@ st.markdown(
             border: 1px solid var(--line);
         }
         
-        .ranking-table .cell-np {
-            background: #e3f5ee;
-            border-color: #b8e6d8;
-        }
-        
-        .ranking-table .data-chip { 
-            width: auto; max-width: 100%; padding: 0; background: transparent; 
-            border: none; font-size: inherit; color: inherit; 
-        }
+        .ranking-table .cell-np { background: #e3f5ee; border-color: #b8e6d8; }
+        .ranking-table .data-chip { width: auto; max-width: 100%; padding: 0; background: transparent; border: none; font-size: inherit; color: inherit; }
         .ranking-table .discount-value { font-size: inherit; }
         
         html[data-theme="dark"] .ranking-table tbody tr { background: var(--surface); }
@@ -285,7 +277,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
 ACCESS_CODE = os.environ.get("SCPISCREEN_ACCESS_CODE", "")
 AUTH_COOKIE_NAME = "scpiscreen_access"
 AUTH_COOKIE_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -297,14 +288,12 @@ if len(ACCESS_CODE) < 16:
     )
     st.stop()
 
-
 def create_access_token() -> str:
     issued_at = str(int(time.time()))
     signature = hmac.new(
         ACCESS_CODE.encode("utf-8"), issued_at.encode("ascii"), hashlib.sha256
     ).hexdigest()
     return f"{issued_at}.{signature}"
-
 
 def is_valid_access_token(token: str | None) -> bool:
     if not token:
@@ -323,7 +312,6 @@ def is_valid_access_token(token: str | None) -> bool:
         ACCESS_CODE.encode("utf-8"), issued_at.encode("ascii"), hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(signature, expected_signature)
-
 
 cookie_manager = stx.CookieManager(key="scpiscreen_auth_cookie")
 if not st.session_state.get("access_granted", False):
@@ -360,15 +348,12 @@ if not st.session_state.get("access_granted", False):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def cached_sheet_data(sheet_id: str) -> dict[str, list[dict[str, str]]]:
-    """Cache worksheet data briefly to avoid repeated Google requests."""
     return load_google_sheet(sheet_id, WORKSHEETS)
-
 
 if st.query_params.get("refresh") == "1":
     cached_sheet_data.clear()
     del st.query_params["refresh"]
     st.rerun()
-
 
 def display_percent(value: str) -> str:
     value = str(value).strip()
@@ -377,38 +362,30 @@ def display_percent(value: str) -> str:
     value = value.replace("%", "").strip()
     return f"{value}%" if value else "—"
 
+def safe_float(val):
+    try:
+        if val is None: return -9999.0
+        s = str(val).replace("%", "").replace("ans", "").replace(" ", "").strip()
+        s = s.replace(",", ".")
+        return float(s) if s else -9999.0
+    except ValueError:
+        return -9999.0
 
 def fact_fields(item: dict[str, Any]) -> list[tuple[str, str]]:
     percent_fields = {
-        "Bonus Louve",
-        "TRI Max Démembrement",
-        "Taux de liquidité",
-        "Taux d'endettement",
-        "Décote",
-        "Part de secteur majoritaire",
-        "Part de logements hors de  France",
-        "Part de région majoritaire",
-        "TOF",
-        "TOP",
-        "TOF-TOP",
-        "Frais d'entrée",
-        "Frais de gestion",
-        "PGA",
-        "TRI",
-        "Revalorisation annuelle moyenne historique",
+        "Bonus Louve", "TRI Max Démembrement", "Taux de liquidité", "Taux d'endettement",
+        "Décote", "Part de secteur majoritaire", "Part de logements hors de  France",
+        "Part de région majoritaire", "TOF", "TOP", "TOF-TOP", "Frais d'entrée",
+        "Frais de gestion", "PGA", "TRI", "Revalorisation annuelle moyenne historique",
         "Revalorisation annuelle moyenne récente",
     }
 
     def format_value(label: str, value: Any) -> str:
         value = str(value or "").strip()
-        if not value:
-            return "—"
-        if label in percent_fields and not value.endswith("%"):
-            value = f"{value}%"
-        if label == "WALB" and not value.lower().endswith("ans"):
-            return f"{value} ans"
-        if label == "Capitalisation (€)" and not value.lower().endswith("millions"):
-            return f"{value} millions"
+        if not value: return "—"
+        if label in percent_fields and not value.endswith("%"): value = f"{value}%"
+        if label == "WALB" and not value.lower().endswith("ans"): return f"{value} ans"
+        if label == "Capitalisation (€)" and not value.lower().endswith("millions"): return f"{value} millions"
         return value
 
     rows = [
@@ -441,10 +418,7 @@ def fact_fields(item: dict[str, Any]) -> list[tuple[str, str]]:
         ("Revalorisation annuelle moyenne récente", item.get("revalorisation_annuelle_recente", "")),
         ("Nombre d'actifs", item.get("nombre_actifs", "")),
     ]
-    formatted = []
-    for label, value in rows:
-        formatted.append((label, format_value(label, value)))
-    return formatted
+    return [(label, format_value(label, value)) for label, value in rows]
 
 
 load_error = ""
@@ -487,9 +461,15 @@ with profile_column:
                 width="stretch",
         )
 
+# Classement par défaut (Score du profil) côté Python
 rankings = build_rankings(data)
 rankings.sort(key=lambda item: item["profile_scores"].get(profile or PROFILE_ORDER[0], 0), reverse=True)
 profile = profile or PROFILE_ORDER[0]
+
+# Mémorisation du rang original
+for i, item in enumerate(rankings, start=1):
+    item["original_rank"] = i
+
 fact_rows_by_scpi = [fact_fields(item) for item in rankings]
 
 if load_error:
@@ -507,7 +487,7 @@ if selected_scpi is None and selected_scpi_id:
         st.query_params.clear()
         st.rerun()
 elif selected_scpi is not None:
-    selected_rank = rankings.index(selected_scpi) + 1
+    selected_rank = selected_scpi["original_rank"]
     if st.button("Retour au classement", icon=":material/arrow_back:"):
         st.query_params.clear()
         st.rerun()
@@ -556,7 +536,7 @@ elif selected_scpi is not None:
         unsafe_allow_html=True,
     )
 else:
-    # Header du tableau avec la barre de recherche intelligente
+    # Tableau de classement
     col_heading, col_search = st.columns([1.5, 1])
     with col_heading:
         st.markdown(
@@ -580,13 +560,30 @@ else:
             )
     st.markdown("<div style='margin-bottom: 1rem;'></div>", unsafe_allow_html=True)
     
+    # Génération des en-têtes compatibles avec le tri JS
+    def build_th(label, sort_type="num"):
+        return f"<th class='sort-btn' data-type='{sort_type}' data-dir='none'>{label} <span class='icon' style='opacity: 0.3; font-size: 0.85em; margin-left: 3px;'>↕</span></th>"
+
+    th_html = "".join([
+        build_th("Place", "num"),
+        build_th("SCPI", "str"),
+        build_th("Note / 100", "num"),
+        build_th("Décote", "num"),
+        build_th("PGA", "num"),
+        build_th("TRI", "num"),
+        build_th("Secteurs<br>majoritaires", "str"),
+        build_th("Régions<br>majoritaires", "str"),
+        build_th("TRI Max<br>Nue Propriété", "num"),
+        build_th("Durée TRI Max<br>Nue Propriété", "num"),
+        build_th("Bonus Louve<br>(cashback)", "num")
+    ])
+    
     table_rows = []
     search_q = search_query.strip().lower() if search_query else ""
     
-    for rank, item in enumerate(rankings, start=1):
+    for item in rankings:
         scpi_name = html.escape(item.get("name", "SCPI"))
         
-        # Filtre de recherche
         if search_q and search_q not in scpi_name.lower():
             continue
             
@@ -601,7 +598,6 @@ else:
         scpi_id = quote(str(item.get("scpi_id", "")), safe="")
         discount_value = item.get("discount", "").strip()
         discount = html.escape(display_percent(discount_value))
-
         pga = html.escape(display_percent(item.get("pga", "")))
         tri = html.escape(display_percent(item.get("tri", "")))
         
@@ -611,37 +607,104 @@ else:
             duree_nue_propriete = f"{duree_nue_propriete} ans"
             
         bonus_louve = html.escape(display_percent(item.get("bonus_louve", "")))
-        
+        actual_rank = item["original_rank"]
+
+        # Chaque cellule contient un data-sort exploitée par le script Javascript
         row_cells = [
-            f"<td class='rank-number {'rank-first' if rank == 1 else ''} cell-place' data-label='Place'>{rank:02}</td>",
-            f"<td class='cell-scpi' data-label='SCPI'><a class='company-link' href='?scpi={scpi_id}'>{scpi_name}</a></td>",
-            f"<td class='cell-score' data-label='Note / 100'><span class='score-pill {score_class}'>{score:.1f}</span></td>",
-            f"<td class='cell-badge' data-label='Décote'><span class='discount-value'>{discount}</span></td>",
-            f"<td class='cell-badge' data-label='PGA'><span class='discount-value'>{pga}</span></td>",
-            f"<td class='cell-badge' data-label='TRI'><span class='discount-value'>{tri}</span></td>",
-            f"<td class='cell-badge' data-label='Secteurs majoritaires'><span class='data-chip'>{html.escape(item.get('main_sectors', '—'))}</span></td>",
-            f"<td class='cell-badge' data-label='Régions majoritaires'><span class='data-chip'>{html.escape(item.get('main_regions', '—'))}</span></td>",
-            f"<td class='cell-badge cell-np' data-label='TRI Max Nue Propriété'><span class='discount-value'>{tri_nue_propriete}</span></td>",
-            f"<td class='cell-badge cell-np' data-label='Durée TRI Max Nue Propriété'><span class='discount-value'>{html.escape(duree_nue_propriete or '—')}</span></td>",
-            f"<td class='cell-badge' data-label='Bonus Louve (cashback)'><span class='discount-value'>{bonus_louve}</span></td>"
+            f"<td class='rank-number {'rank-first' if actual_rank == 1 else ''} cell-place' data-label='Place' data-sort='{actual_rank}'>{actual_rank:02}</td>",
+            f"<td class='cell-scpi' data-label='SCPI' data-sort='{scpi_name.lower()}'><a class='company-link' href='?scpi={scpi_id}' target='_self'>{scpi_name}</a></td>",
+            f"<td class='cell-score' data-label='Note / 100' data-sort='{score}'><span class='score-pill {score_class}'>{score:.1f}</span></td>",
+            f"<td class='cell-badge' data-label='Décote' data-sort='{safe_float(item.get('discount'))}'><span class='discount-value'>{discount}</span></td>",
+            f"<td class='cell-badge' data-label='PGA' data-sort='{safe_float(item.get('pga'))}'><span class='discount-value'>{pga}</span></td>",
+            f"<td class='cell-badge' data-label='TRI' data-sort='{safe_float(item.get('tri'))}'><span class='discount-value'>{tri}</span></td>",
+            f"<td class='cell-badge' data-label='Secteurs majoritaires' data-sort='{html.escape(item.get('main_sectors', '')).lower()}'><span class='data-chip'>{html.escape(item.get('main_sectors', '—'))}</span></td>",
+            f"<td class='cell-badge' data-label='Régions majoritaires' data-sort='{html.escape(item.get('main_regions', '')).lower()}'><span class='data-chip'>{html.escape(item.get('main_regions', '—'))}</span></td>",
+            f"<td class='cell-badge cell-np' data-label='TRI Max Nue Propriété' data-sort='{safe_float(item.get('tri_demembrement'))}'><span class='discount-value'>{tri_nue_propriete}</span></td>",
+            f"<td class='cell-badge cell-np' data-label='Durée TRI Max Nue Propriété' data-sort='{safe_float(item.get('duree_tri_demembrement'))}'><span class='discount-value'>{html.escape(duree_nue_propriete or '—')}</span></td>",
+            f"<td class='cell-badge' data-label='Bonus Louve (cashback)' data-sort='{safe_float(item.get('bonus_louve'))}'><span class='discount-value'>{bonus_louve}</span></td>"
         ]
-        
         table_rows.append("<tr>" + "".join(row_cells) + "</tr>")
     
     if not table_rows:
         table_rows.append(
-            "<tr><td colspan='9' style='text-align: center; padding: 3rem 1rem; color: var(--muted); font-size: 1rem; border-bottom: none;'>"
+            "<tr><td colspan='11' style='text-align: center; padding: 3rem 1rem; color: var(--muted); font-size: 1rem; border-bottom: none;'>"
             "Aucune SCPI ne correspond à votre recherche.</td></tr>"
         )
         
     st.markdown(
-        "<div class='ranking-scroll'><table class='ranking-table'><thead><tr><th>Place</th><th>SCPI</th>"
-        "<th>Note / 100</th><th>Décote</th><th>PGA</th><th>TRI</th><th>Secteurs<br>majoritaires</th>"
-        "<th>Régions<br>majoritaires</th><th>TRI Max<br>Nue Propriété</th><th>Durée TRI Max<br>Nue Propriété</th>"
-        "<th>Bonus Louve<br>(cashback)</th></tr></thead><tbody>"
-        + "".join(table_rows)
-        + "</tbody></table></div>",
+        f"""
+        <div class='ranking-scroll'>
+            <table class='ranking-table'>
+                <thead><tr>{th_html}</tr></thead>
+                <tbody>{"".join(table_rows)}</tbody>
+            </table>
+        </div>
+        """,
         unsafe_allow_html=True,
+    )
+    
+    components.html(
+        """
+        <script>
+        function initSort() {
+            var parentDoc = window.parent.document;
+            var table = parentDoc.querySelector('.ranking-table');
+            
+            if (table && !table.dataset.sortinit) {
+                table.dataset.sortinit = '1';
+                var ths = table.querySelectorAll('th.sort-btn');
+                
+                ths.forEach(function(th, i) {
+                    th.addEventListener('click', function() {
+                        var tbody = table.querySelector('tbody');
+                        var rows = Array.from(tbody.querySelectorAll('tr'));
+                        var isAsc = th.dataset.dir === 'asc';
+                        var newDir = isAsc ? 'desc' : 'asc';
+                        
+                        // Réinitialiser les flèches
+                        ths.forEach(function(h) {
+                            h.dataset.dir = 'none';
+                            h.querySelector('.icon').innerHTML = '↕';
+                            h.querySelector('.icon').style.opacity = '0.3';
+                        });
+                        
+                        // Mettre à jour la flèche cliquée
+                        th.dataset.dir = newDir;
+                        th.querySelector('.icon').innerHTML = newDir === 'asc' ? '↑' : '↓';
+                        th.querySelector('.icon').style.opacity = '1';
+                        
+                        // Trier les lignes
+                        rows.sort(function(a, b) {
+                            var vA = a.children[i].dataset.sort;
+                            var vB = b.children[i].dataset.sort;
+                            if (th.dataset.type === 'num') {
+                                return newDir === 'asc' ? parseFloat(vA) - parseFloat(vB) : parseFloat(vB) - parseFloat(vA);
+                            } else {
+                                return newDir === 'asc' ? vA.localeCompare(vB) : vB.localeCompare(vA);
+                            }
+                        });
+                        
+                        // Réinjecter les lignes triées
+                        rows.forEach(function(r) { tbody.appendChild(r); });
+                    });
+                });
+                return true;
+            }
+            return false;
+        }
+        
+        // Exécute la fonction jusqu'à ce que le tableau soit bien rendu dans le DOM
+        var attempts = 0;
+        var interval = setInterval(function() {
+            if (initSort() || attempts > 20) {
+                clearInterval(interval);
+            }
+            attempts++;
+        }, 100);
+        </script>
+        """,
+        height=0,
+        width=0,
     )
 
 st.markdown(
