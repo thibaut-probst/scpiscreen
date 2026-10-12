@@ -14,7 +14,9 @@ jobs:
 
       - name: Keep-alive empty commit
         run: |
+          date -u > last_active.txt
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git commit --allow-empty -m "Chore: Keepalive Streamlit Cloud"
+          git add last_active.txt
+          git commit -m "Chore: Keepalive Streamlit Cloud [skip ci]"
           git push
