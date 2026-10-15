@@ -105,7 +105,7 @@ st.markdown(
     [data-testid="stSegmentedControl"] > div { padding: .28rem; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); box-shadow: 0 5px 18px rgba(20, 48, 67, .045); }
     [data-testid="stSegmentedControl"] button { min-height: 2.7rem; border-radius: 9px !important; font-size: .82rem !important; font-weight: 600 !important; transition: color .16s ease, background .16s ease, box-shadow .16s ease; }
     [data-testid="stSegmentedControl"] button[aria-pressed="true"] { border-color: #b8e6d8 !important; color: #075d56 !important; background: #e3f5ee !important; box-shadow: 0 2px 7px rgba(8, 126, 116, .1) !important; }
-    [data-testid="stSegmentedControl"] button:focus-visible, [data-testid="stToggle"] [role="switch"]:focus-visible { outline: 3px solid rgba(22,119,255,.35) !important; outline-offset: 2px; }
+    [data-testid="stToggle"] [role="switch"]:focus-visible { outline: 3px solid rgba(22,119,255,.35) !important; outline-offset: 2px; }
     [data-testid="stToggle"] [role="switch"][aria-checked="true"] { background: #087e74 !important; border-color: #087e74 !important; }
     
     .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 1.8rem 0 .9rem; }
@@ -191,6 +191,9 @@ st.markdown(
     [data-testid="stMainMenuItem-theme-System"]::after { content: "Système"; font-size: .875rem; }
     [data-testid="stMainMenuItem-theme-Light"]::after { content: "Jour"; font-size: .875rem; }
     [data-testid="stMainMenuItem-theme-Dark"]::after { content: "Nuit"; font-size: .875rem; }
+
+    /* Mobile Sort Component styling */
+    .mobile-sort-container { display: none; }
     
     /* MOBILE VIEW */
     @media (max-width: 760px) {
@@ -202,7 +205,16 @@ st.markdown(
         .masthead-tools { flex-wrap: wrap; }
         .source-badge { display: none; }
         [data-testid="stSegmentedControl"] button { min-height: 2.8rem; font-size: .76rem !important; }
-        .section-heading { margin-top: 1.3rem; }
+        
+        .section-heading { margin-top: 1.3rem; margin-bottom: 0.5rem; }
+        .mobile-sort-container {
+            display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.8rem;
+        }
+        .mobile-sort-container label { font-size: 0.8rem; font-weight: bold; color: var(--muted); margin: 0; }
+        #mobile-sort-select {
+            padding: 0.35rem 0.5rem; border-radius: 8px; border: 1px solid var(--line);
+            background: var(--surface); color: var(--ink); font-size: 0.85rem; flex: 1; outline: none;
+        }
         
         .category-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
         .indicator-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -218,8 +230,8 @@ st.markdown(
         .ranking-table tbody tr {
             display: flex;
             flex-wrap: wrap;
-            align-items: center;
-            gap: 0.35rem 0.5rem;
+            align-items: baseline;
+            gap: 0.15rem 0.4rem;
             margin-bottom: 0.6rem;
             padding: 0.6rem 0.75rem;
             border: 1px solid var(--line);
@@ -229,39 +241,46 @@ st.markdown(
         }
         
         .ranking-table td { 
-            padding: 0; display: flex; flex-direction: row; 
-            align-items: center; width: auto; border: none; overflow-wrap: anywhere;
+            padding: 0; display: inline-flex; flex-direction: row; 
+            align-items: baseline; width: auto; border: none; overflow-wrap: anywhere;
         }
+        
+        /* Optimization of labels space - replacing colons with simple space */
         .ranking-table td::before { 
-            content: attr(data-label) " : "; font-size: .6rem; letter-spacing: .05em; 
-            margin-right: 0.25rem; font-weight: 700; text-transform: uppercase; color: var(--muted); 
+            content: attr(data-label) " "; font-size: .65rem; letter-spacing: .02em; 
+            margin-right: 0.15rem; font-weight: 700; text-transform: uppercase; color: var(--muted); 
         }
         
-        .ranking-table .cell-place { order: 1; font-weight: bold; }
+        /* Start with the score first, then place, then title */
+        .ranking-table .cell-place { order: 1; font-weight: bold; margin-right: 0.3rem; }
         .ranking-table .cell-place::before { content: "#"; margin-right: 0.1rem; font-size: .75rem; }
-        
-        .ranking-table .cell-scpi { order: 2; flex: 1 1 auto; }
+
+        .ranking-table .cell-scpi { order: 2; margin-right: 0.5rem; }
         .ranking-table .cell-scpi::before { content: none; }
         .ranking-table .cell-scpi .company-link { font-size: 1.05rem; }
-        
-        .ranking-table .cell-score { order: 3; }
+
+        .ranking-table .cell-score { order: 3; flex: 1 1 auto; margin-bottom: 0.3rem; }
         .ranking-table .cell-score::before { content: none; }
         
+        /* Make data chips tight */
         .ranking-table .cell-badge {
             order: 4;
-            font-size: 0.7rem;
-            background: var(--surface-soft);
-            padding: 0.2rem 0.45rem;
-            border-radius: 6px;
-            border: 1px solid var(--line);
+            font-size: 0.75rem;
+            background: transparent;
+            padding: 0;
+            border: none;
+            margin-right: 0.5rem;
+            margin-bottom: 0.2rem;
         }
         
-        .ranking-table .cell-np { background: #e3f5ee; border-color: #b8e6d8; }
-        .ranking-table .data-chip { width: auto; max-width: 100%; padding: 0; background: transparent; border: none; font-size: inherit; color: inherit; }
-        .ranking-table .discount-value { font-size: inherit; }
+        /* Remove specific pale green color for NP elements on mobile */
+        .ranking-table .cell-np { background: transparent !important; border-color: transparent !important; }
+        html[data-theme="dark"] .ranking-table .cell-np { background: transparent !important; border-color: transparent !important; }
+        
+        .ranking-table .data-chip { width: auto; max-width: 100%; padding: 0; background: transparent; border: none; font-size: inherit; color: inherit; font-weight: 600; }
+        .ranking-table .discount-value { font-size: inherit; font-weight: 600; }
         
         html[data-theme="dark"] .ranking-table tbody tr { background: var(--surface); }
-        html[data-theme="dark"] .ranking-table .cell-np { background: #1c403f; border-color: #37675e; }
     }
     
     @media (max-width: 420px) {
@@ -461,12 +480,12 @@ with profile_column:
                 width="stretch",
         )
 
-# Classement par défaut (Score du profil) côté Python
+# Default ranking (Profile score) on Python side
 rankings = build_rankings(data)
 rankings.sort(key=lambda item: item["profile_scores"].get(profile or PROFILE_ORDER[0], 0), reverse=True)
 profile = profile or PROFILE_ORDER[0]
 
-# Mémorisation du rang original
+# Store original rank
 for i, item in enumerate(rankings, start=1):
     item["original_rank"] = i
 
@@ -536,7 +555,7 @@ elif selected_scpi is not None:
         unsafe_allow_html=True,
     )
 else:
-    # Tableau de classement
+    # Ranking table
     col_heading, col_search = st.columns([1.5, 1])
     with col_heading:
         st.markdown(
@@ -558,9 +577,8 @@ else:
                 placeholder="🔍 Rechercher une SCPI... (Appuyez sur Entrée)",
                 label_visibility="collapsed"
             )
-    st.markdown("<div style='margin-bottom: 1rem;'></div>", unsafe_allow_html=True)
     
-    # Génération des en-têtes compatibles avec le tri JS
+    # Generate headers compatible with JS sorting
     def build_th(label, sort_type="num"):
         return f"<th class='sort-btn' data-type='{sort_type}' data-dir='none'>{label} <span class='icon' style='opacity: 0.3; font-size: 0.85em; margin-left: 3px;'>↕</span></th>"
 
@@ -577,6 +595,23 @@ else:
         build_th("Durée TRI Max<br>Nue Propriété", "num"),
         build_th("Bonus Louve<br>(cashback)", "num")
     ])
+    
+    # Mobile Sort View Injector
+    st.markdown(
+        """
+        <div class='mobile-sort-container'>
+            <label for='mobile-sort-select'>Trier par :</label>
+            <select id='mobile-sort-select'>
+                <option value='0' data-dir='asc' data-type='num'>Place</option>
+                <option value='3' data-dir='desc' data-type='num'>Décote</option>
+                <option value='4' data-dir='desc' data-type='num'>PGA</option>
+                <option value='5' data-dir='desc' data-type='num'>TRI</option>
+                <option value='8' data-dir='desc' data-type='num'>TRI Max Nue Propriété</option>
+            </select>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
     
     table_rows = []
     search_q = search_query.strip().lower() if search_query else ""
@@ -609,7 +644,7 @@ else:
         bonus_louve = html.escape(display_percent(item.get("bonus_louve", "")))
         actual_rank = item["original_rank"]
 
-        # Chaque cellule contient un data-sort exploitée par le script Javascript
+        # Each cell contains a data-sort attribute used by the Javascript script
         row_cells = [
             f"<td class='rank-number {'rank-first' if actual_rank == 1 else ''} cell-place' data-label='Place' data-sort='{actual_rank}'>{actual_rank:02}</td>",
             f"<td class='cell-scpi' data-label='SCPI' data-sort='{scpi_name.lower()}'><a class='company-link' href='?scpi={scpi_id}' target='_self'>{scpi_name}</a></td>",
@@ -649,6 +684,7 @@ else:
         function initSort() {
             var parentDoc = window.parent.document;
             var table = parentDoc.querySelector('.ranking-table');
+            var mobileSort = parentDoc.getElementById('mobile-sort-select');
             
             if (table && !table.dataset.sortinit) {
                 table.dataset.sortinit = '1';
@@ -661,19 +697,19 @@ else:
                         var isAsc = th.dataset.dir === 'asc';
                         var newDir = isAsc ? 'desc' : 'asc';
                         
-                        // Réinitialiser les flèches
+                        // Reset arrows
                         ths.forEach(function(h) {
                             h.dataset.dir = 'none';
                             h.querySelector('.icon').innerHTML = '↕';
                             h.querySelector('.icon').style.opacity = '0.3';
                         });
                         
-                        // Mettre à jour la flèche cliquée
+                        // Update clicked arrow
                         th.dataset.dir = newDir;
                         th.querySelector('.icon').innerHTML = newDir === 'asc' ? '↑' : '↓';
                         th.querySelector('.icon').style.opacity = '1';
                         
-                        // Trier les lignes
+                        // Sort rows
                         rows.sort(function(a, b) {
                             var vA = a.children[i].dataset.sort;
                             var vB = b.children[i].dataset.sort;
@@ -684,16 +720,41 @@ else:
                             }
                         });
                         
-                        // Réinjecter les lignes triées
+                        // Re-inject sorted rows
                         rows.forEach(function(r) { tbody.appendChild(r); });
                     });
                 });
+                
+                // Initialize Mobile Sorting
+                if (mobileSort) {
+                    mobileSort.addEventListener('change', function(e) {
+                        var tbody = table.querySelector('tbody');
+                        var rows = Array.from(tbody.querySelectorAll('tr'));
+                        var i = parseInt(e.target.value);
+                        var option = e.target.options[e.target.selectedIndex];
+                        var newDir = option.dataset.dir;
+                        var type = option.dataset.type;
+                        
+                        rows.sort(function(a, b) {
+                            var vA = a.children[i].dataset.sort;
+                            var vB = b.children[i].dataset.sort;
+                            if (type === 'num') {
+                                return newDir === 'asc' ? parseFloat(vA) - parseFloat(vB) : parseFloat(vB) - parseFloat(vA);
+                            } else {
+                                return newDir === 'asc' ? vA.localeCompare(vB) : vB.localeCompare(vA);
+                            }
+                        });
+                        
+                        rows.forEach(function(r) { tbody.appendChild(r); });
+                    });
+                }
+                
                 return true;
             }
             return false;
         }
         
-        // Exécute la fonction jusqu'à ce que le tableau soit bien rendu dans le DOM
+        // Execute the function until the table is rendered in the DOM
         var attempts = 0;
         var interval = setInterval(function() {
             if (initSort() || attempts > 20) {
