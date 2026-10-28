@@ -468,7 +468,7 @@ st.markdown(
         unsafe_allow_html=True,
 )
 
-profile_column, empty_column = st.columns([1.7, 1.3])
+profile_column, empty_column = st.columns([1.7, 0.3])
 with profile_column:
         st.markdown('<div class="profile-label">Profil d’investissement</div>', unsafe_allow_html=True)
         profile = st.segmented_control(

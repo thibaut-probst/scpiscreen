@@ -22,7 +22,7 @@ CATEGORY_ORDER = [
     "Maturité",
     "Rentabilité",
 ]
-PROFILE_ORDER = ["Équilibre", "Stabilité", "Performance", "Assurance-vie"]
+PROFILE_ORDER = ["Équilibre", "Stabilité", "Performance", "Assurance-vie", "Nue-Propriété"]
 MAX_SHEET_RESPONSE_BYTES = 8 * 1024 * 1024
 
 class SheetLoadError(RuntimeError):
@@ -146,6 +146,7 @@ def build_rankings(data: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]
             "Stabilité": "Note Stabilité",
             "Performance": "Note Performance",
             "Assurance-vie": "Note Assurance-vie",
+            "Nue-Propriété": "Note Nue-Propriété", 
         }
         profile_scores = {
             profile: _number(score_row.get(column, 0.0))
