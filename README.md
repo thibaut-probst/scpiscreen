@@ -14,7 +14,7 @@ Set `SCPISCREEN_ACCESS_CODE` as a server environment variable (or in your hostin
 
 `extra-streamlit-components` does not support `HttpOnly` cookies, so the browser-side token is readable by same-origin JavaScript. Streamlit's client IP is also not suitable for enforcing login limits. For a public deployment, put the app behind an identity-aware reverse proxy that issues `HttpOnly` sessions and rate-limits authentication attempts; do not treat the shared access code alone as strong user authentication.
 
-The app reads the `Data` and `Scores` tabs from the configured Google Sheet. Set `SHEET_ID` near the top of `scpi_data.py`; the workbook must be readable without signing in (for example, shared as "Anyone with the link"). The app has no sample-data fallback.
+The app reads the `Data`, `Scores` and `Pondérations` tabs from the configured Google Sheet. Set `SHEET_ID` near the top of `scpi_data.py`; the workbook must be readable without signing in (for example, shared as "Anyone with the link"). The app has no sample-data fallback.
 
 ## Configure the workbook
 
@@ -24,12 +24,13 @@ The worksheet names are mapped in `WORKSHEETS` in `scpi_data.py`. Keep these tab
 | --- | --- | --- |
 | `Data` | `SCPI` plus the displayed SCPI detail fields | One row per SCPI; provides names and detail data. |
 | `Scores` | `Catégorie SCPI`, four `Note ...` profile columns, and the five category score columns | Provides the final pre-calculated scores displayed by the application. |
+| `Pondérations` | Row `Catégorie`, row `Critère`, then one row per profile (`Équilibre`, `Stabilité`, `Performance`, `Assurance-vie`, `Nue-Propriété`) | Weights displayed on the « Méthode de classement » page (documentation only; not used for scoring). |
 
 The profile note columns are `Note Equilibre`, `Note Stabilité`, `Note Performance`, and `Note Assurance-vie`. Category columns are `Structure financière`, `Diversification`, `Sécurité locative`, `Maturité`, and `Rentabilité`. Keep the `Catégorie SCPI` names aligned with the `SCPI` names in `Data`; when names differ, the app uses validated row alignment as a fallback.
 
-You can keep the `Pondérations` tab in the workbook to calculate the final notes there. The application does not load that tab or recalculate profile scores; it displays the final values from `Scores`.
+The `Pondérations` tab can be used to calculate the final notes in the workbook. The application never recalculates profile scores: it displays the final values from `Scores`, and only reads `Pondérations` to explain the method on the « Méthode de classement » page. Rows are located by the label in column A (`Catégorie`, `Critère`, profile names), so row order does not matter; a `Total` column is ignored and recomputed (a total different from 100 % is highlighted).
 
-The full ranking shows the place, SCPI name, profile score, discount, major sectors, and major regions. Select a SCPI name to open its detail sheet. `main_sectors` and `main_regions` are displayed as provided, so separate multiple values with a comma or middle dot.
+The full ranking shows the place, SCPI name, profile score, discount, major sectors, and major regions. Select a SCPI name to open its detail sheet. On mobile, an « Affichage » switch toggles between the card list (`Cartes`) and the horizontally scrollable table (`Tableau`). `main_sectors` and `main_regions` are displayed as provided, so separate multiple values with a comma or middle dot.
 
 Numeric values can use a comma decimal separator.
 

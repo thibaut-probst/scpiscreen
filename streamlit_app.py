@@ -22,8 +22,11 @@ from scpi_data import (
     WORKSHEETS,
     SheetLoadError,
     build_rankings,
+    build_weight_matrix,
     load_google_sheet,
+    load_weights_sheet,
 )
+from method_page import build_method_page_html
 
 st.set_page_config(
     page_title="SCPIScreen",
@@ -180,6 +183,68 @@ st.markdown(
     html[data-theme="dark"] [data-testid="stButton"] button { border-color: #3a5a63; color: #9de0cf; }
     html[data-theme="dark"] [data-testid="stButton"] button:hover { background: #214541; }
     
+    /* Page navigation and mobile view toggle */
+    .st-key-page_navigation { margin-bottom: .35rem; }
+    .st-key-mobile_view_toolbar { display: none !important; }
+    .mobile-hint { display: none; }
+
+    /* Method page */
+    .method-intro { max-width: 52rem; margin: .2rem 0 1.2rem; color: var(--muted); font-size: .98rem; line-height: 1.6; }
+    .method-intro strong { color: var(--ink); }
+    .method-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .9rem; margin-bottom: .6rem; }
+    .method-step { padding: 1.2rem 1.3rem; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-card); }
+    .method-step-number { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: 9px; color: var(--blue); background: var(--blue-pale); font-size: .85rem; font-weight: 700; }
+    .method-step-title { margin-top: .8rem; color: var(--ink); font-size: 1rem; font-weight: 700; letter-spacing: -.02em; }
+    .method-step-text { margin-top: .35rem; color: var(--muted); font-size: .86rem; line-height: 1.55; }
+
+    .profile-cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .8rem; }
+    .profile-card { padding: 1.1rem 1.15rem; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-card); }
+    .profile-card-name { color: var(--ink); font-family: 'Fraunces', Georgia, serif; font-size: 1.2rem; letter-spacing: -.03em; }
+    .profile-card-focus { margin-top: .25rem; color: var(--muted); font-size: .74rem; line-height: 1.4; }
+    .priority-list { display: grid; gap: .5rem; margin: .85rem 0 0; padding: .8rem 0 0; border-top: 1px solid var(--line); list-style: none; }
+    .priority-list li { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; margin: 0; color: var(--ink); font-size: .8rem; line-height: 1.35; }
+    .priority-weight { flex: 0 0 auto; color: var(--blue); font-weight: 700; font-variant-numeric: tabular-nums; }
+
+    .weights-scroll { width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow-card); }
+    .weights-table { width: 100%; min-width: 720px; border-collapse: separate; border-spacing: 0; }
+    .weights-table thead th, .weights-table tbody th, .weights-table tbody td { border-top: 0; border-left: 0; border-right: 0; }
+    .weights-table thead th { padding: .95rem 1rem; border-bottom: 1px solid rgba(188, 236, 223, .16); color: #dce9f5; background: #15364f; font-size: .64rem; font-weight: 700; letter-spacing: .1em; text-align: center; text-transform: uppercase; }
+    .weights-table thead th:first-child { text-align: left; }
+    .weights-table tbody th, .weights-table tbody td { padding: .68rem 1rem; border-bottom: 1px solid var(--line); color: var(--ink); font-size: .84rem; line-height: 1.4; }
+    .weights-table tbody th { background: var(--surface); font-weight: 500; text-align: left; }
+    .weights-table tbody th.criterion-name { padding-left: 1.7rem; }
+    .weights-table .weight-cell { background: color-mix(in srgb, var(--blue) var(--heat, 0%), transparent); font-variant-numeric: tabular-nums; text-align: center; }
+    .weights-table .weight-cell.is-zero { color: var(--muted); opacity: .6; }
+    .weights-table .group-row th, .weights-table .group-row td { background: var(--blue-pale); font-weight: 700; }
+    .weights-table .total-row th, .weights-table .total-row td { border-bottom: 0; color: #f5f9fd; background: var(--blue-deep); font-weight: 700; }
+    .weights-table .total-row .weight-cell.is-off { color: #ffb4a8; }
+    .weights-table thead th:first-child, .weights-table tbody th { position: sticky; left: 0; z-index: 1; box-shadow: 1px 0 0 var(--line); }
+    .weights-table thead th:first-child { z-index: 2; }
+
+    @media (max-width: 1100px) {
+        .profile-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 760px) {
+        /* Mobile ranking: cards / table toggle */
+        .st-key-mobile_view_toolbar { display: flex !important; }
+        .mobile-sort-container.is-hidden { display: none !important; }
+        .ranking-scroll.view-table { border-radius: 14px; -webkit-overflow-scrolling: touch; }
+        .ranking-scroll.view-table .ranking-table th, .ranking-scroll.view-table .ranking-table td { padding: .75rem .8rem; }
+        .ranking-scroll.view-table .ranking-table td.cell-scpi { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line); }
+        .ranking-scroll.view-table .ranking-table th:nth-child(2) { left: 0; z-index: 3; }
+
+        /* Method page */
+        .method-steps, .profile-cards { grid-template-columns: 1fr; }
+        .method-intro { font-size: .9rem; }
+        .mobile-hint { display: block; margin: 0 0 .5rem; color: var(--muted); font-size: .75rem; }
+        .weights-table { min-width: 560px; }
+        .weights-table thead th { padding: .75rem .45rem; font-size: .58rem; letter-spacing: .05em; }
+        .weights-table tbody th, .weights-table tbody td { padding: .55rem .5rem; font-size: .78rem; }
+        .weights-table thead th:first-child, .weights-table tbody th { min-width: 9.5rem; max-width: 9.5rem; }
+        .weights-table tbody th.criterion-name { padding-left: .9rem; }
+    }
+
     /* Hide some st default menus */
     [data-testid="stMainMenuItem-recordScreencast"] { display: none !important; }
     [data-testid="stMainMenuItem-print"] [data-testid="stMainMenuItemLabel"] { font-size: 0; }
@@ -223,11 +288,11 @@ st.markdown(
         .scpi-card { padding: 1.1rem; border-radius: 17px; }
         
         /* Table overrides for mobile (Flex Layout) */
-        .ranking-scroll { max-width: 100%; overflow: visible; border: 0; background: transparent; box-shadow: none; }
-        .ranking-table, .ranking-table tbody { display: block; width: 100%; min-width: 0; max-width: 100%; }
-        .ranking-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+        .ranking-scroll.view-cards { max-width: 100%; overflow: visible; border: 0; background: transparent; box-shadow: none; }
+        .ranking-scroll.view-cards .ranking-table, .ranking-scroll.view-cards .ranking-table tbody { display: block; width: 100%; min-width: 0; max-width: 100%; }
+        .ranking-scroll.view-cards .ranking-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
         
-        .ranking-table tbody tr {
+        .ranking-scroll.view-cards .ranking-table tbody tr {
             display: flex;
             flex-wrap: wrap;
             align-items: baseline;
@@ -240,30 +305,30 @@ st.markdown(
             box-shadow: 0 4px 12px rgba(20, 48, 67, .04);
         }
         
-        .ranking-table td { 
+        .ranking-scroll.view-cards .ranking-table td { 
             padding: 0; display: inline-flex; flex-direction: row; 
             align-items: baseline; width: auto; border: none; overflow-wrap: anywhere;
         }
         
         /* Optimization of labels space - replacing colons with simple space */
-        .ranking-table td::before { 
+        .ranking-scroll.view-cards .ranking-table td::before { 
             content: attr(data-label) " "; font-size: .65rem; letter-spacing: .02em; 
             margin-right: 0.15rem; font-weight: 700; text-transform: uppercase; color: var(--muted); 
         }
         
         /* Start with the score first, then place, then title */
-        .ranking-table .cell-place { order: 1; font-weight: bold; margin-right: 0.3rem; }
-        .ranking-table .cell-place::before { content: "#"; margin-right: 0.1rem; font-size: .75rem; }
+        .ranking-scroll.view-cards .ranking-table .cell-place { order: 1; font-weight: bold; margin-right: 0.3rem; }
+        .ranking-scroll.view-cards .ranking-table .cell-place::before { content: "#"; margin-right: 0.1rem; font-size: .75rem; }
 
-        .ranking-table .cell-scpi { order: 2; margin-right: 0.5rem; }
-        .ranking-table .cell-scpi::before { content: none; }
-        .ranking-table .cell-scpi .company-link { font-size: 1.05rem; }
+        .ranking-scroll.view-cards .ranking-table .cell-scpi { order: 2; margin-right: 0.5rem; }
+        .ranking-scroll.view-cards .ranking-table .cell-scpi::before { content: none; }
+        .ranking-scroll.view-cards .ranking-table .cell-scpi .company-link { font-size: 1.05rem; }
 
-        .ranking-table .cell-score { order: 3; flex: 1 1 auto; margin-bottom: 0.3rem; }
-        .ranking-table .cell-score::before { content: none; }
+        .ranking-scroll.view-cards .ranking-table .cell-score { order: 3; flex: 1 1 auto; margin-bottom: 0.3rem; }
+        .ranking-scroll.view-cards .ranking-table .cell-score::before { content: none; }
         
         /* Make data chips tight */
-        .ranking-table .cell-badge {
+        .ranking-scroll.view-cards .ranking-table .cell-badge {
             order: 4;
             font-size: 0.75rem;
             background: transparent;
@@ -274,13 +339,13 @@ st.markdown(
         }
         
         /* Remove specific pale green color for NP elements on mobile */
-        .ranking-table .cell-np { background: transparent !important; border-color: transparent !important; }
-        html[data-theme="dark"] .ranking-table .cell-np { background: transparent !important; border-color: transparent !important; }
+        .ranking-scroll.view-cards .ranking-table .cell-np { background: transparent !important; border-color: transparent !important; }
+        html[data-theme="dark"] .ranking-scroll.view-cards .ranking-table .cell-np { background: transparent !important; border-color: transparent !important; }
         
-        .ranking-table .data-chip { width: auto; max-width: 100%; padding: 0; background: transparent; border: none; font-size: inherit; color: inherit; font-weight: 600; }
-        .ranking-table .discount-value { font-size: inherit; font-weight: 600; }
+        .ranking-scroll.view-cards .ranking-table .data-chip { width: auto; max-width: 100%; padding: 0; background: transparent; border: none; font-size: inherit; color: inherit; font-weight: 600; }
+        .ranking-scroll.view-cards .ranking-table .discount-value { font-size: inherit; font-weight: 600; }
         
-        html[data-theme="dark"] .ranking-table tbody tr { background: var(--surface); }
+        html[data-theme="dark"] .ranking-scroll.view-cards .ranking-table tbody tr { background: var(--surface); }
     }
     
     @media (max-width: 420px) {
@@ -289,7 +354,7 @@ st.markdown(
         [data-testid="stSegmentedControl"] button { padding: .35rem .3rem !important; }
         .category-grid { grid-template-columns: 1fr; }
         .fact-grid { grid-template-columns: 1fr 1fr; }
-        .ranking-table tbody tr { padding-right: .6rem; padding-left: .6rem; }
+        .ranking-scroll.view-cards .ranking-table tbody tr { padding-right: .6rem; padding-left: .6rem; }
     }
     </style>
     """,
@@ -369,8 +434,13 @@ if not st.session_state.get("access_granted", False):
 def cached_sheet_data(sheet_id: str) -> dict[str, list[dict[str, str]]]:
     return load_google_sheet(sheet_id, WORKSHEETS)
 
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_weights_data(sheet_id: str) -> list[list[str]]:
+    return load_weights_sheet(sheet_id)
+
 if st.query_params.get("refresh") == "1":
     cached_sheet_data.clear()
+    cached_weights_data.clear()
     del st.query_params["refresh"]
     st.rerun()
 
@@ -467,6 +537,76 @@ st.markdown(
         """,
         unsafe_allow_html=True,
 )
+
+def render_footer() -> None:
+    """Render the license and liability notice."""
+    st.markdown(
+        "**Licence Open Source (GNU GPL v3) :** Cet outil est distribué sous licence libre GNU GPL v3. "
+        "Toute redistribution de ce projet ou de ses œuvres dérivées doit être effectuée sous cette même licence, "
+        "conserver l'accès libre au code source et aux formules, et maintenir les crédits d'origine. "
+        "Les données publiques de marché utilisées proviennent notamment de [Louve Invest](https://www.louveinvest.com/scpi/liste-scpi).\n\n"
+        "**Avertissement de responsabilité :** Cet outil est un support quantitatif d'analyse et de décision fondé sur des données publiques et des modèles mathématiques de pondération pour calculer des scores et établir un classement. "
+        "Il ne constitue en aucun cas un conseil en investissement ni une activité de démarchage financier au sens de la réglementation de l'AMF. "
+        "Il n'a pas vocation à fournir un conseil personnalisé. Les performances passées ne préjugent pas des performances futures."
+    )
+
+
+def render_method_page() -> None:
+    """Render the ranking methodology page from the weights tab."""
+    try:
+        matrix = build_weight_matrix(cached_weights_data(SHEET_ID))
+    except SheetLoadError as error:
+        st.error(f"Les pondérations du Google Sheet ne sont pas accessibles : {error}")
+        return
+    st.markdown(build_method_page_html(matrix), unsafe_allow_html=True)
+
+
+PAGE_RANKING = "Classement"
+PAGE_METHOD = "Méthode de classement"
+PAGE_OPTIONS = [PAGE_RANKING, PAGE_METHOD]
+PAGE_QUERY_METHOD = "methode"
+
+MOBILE_VIEW_CARDS = "Cartes"
+MOBILE_VIEW_TABLE = "Tableau"
+MOBILE_VIEW_OPTIONS = [MOBILE_VIEW_CARDS, MOBILE_VIEW_TABLE]
+
+
+def handle_page_change() -> None:
+    """Keep the URL in sync with the page selector and leave any SCPI detail view."""
+    selected = st.session_state.get("page_selector")
+    if selected is None:
+        # Clicking the active page again deselects it: restore it (acts as "back").
+        selected = st.session_state.get("current_page", PAGE_RANKING)
+        st.session_state["page_selector"] = selected
+    st.session_state["current_page"] = selected
+    st.query_params.clear()
+    if selected == PAGE_METHOD:
+        st.query_params["page"] = PAGE_QUERY_METHOD
+
+
+# The URL is the source of truth, so deep links and the browser back button work.
+requested_page = PAGE_METHOD if st.query_params.get("page") == PAGE_QUERY_METHOD else PAGE_RANKING
+if st.session_state.get("current_page") != requested_page:
+    st.session_state["current_page"] = requested_page
+    st.session_state["page_selector"] = requested_page
+
+with st.container(key="page_navigation"):
+    st.segmented_control(
+        "Page",
+        PAGE_OPTIONS,
+        key="page_selector",
+        label_visibility="collapsed",
+        on_change=handle_page_change,
+    )
+
+if requested_page == PAGE_METHOD:
+    # Widgets that are not rendered lose their state: re-assign it to keep the user's choices.
+    for preserved_key in ("profile_selector", "mobile_view_selector"):
+        if preserved_key in st.session_state:
+            st.session_state[preserved_key] = st.session_state[preserved_key]
+    render_method_page()
+    render_footer()
+    st.stop()
 
 profile_column, empty_column = st.columns([1.7, 0.3])
 with profile_column:
@@ -578,6 +718,21 @@ else:
                 label_visibility="collapsed"
             )
     
+    # Mobile only (hidden by CSS on desktop): choose between cards and a scrollable table
+    with st.container(key="mobile_view_toolbar"):
+        st.markdown('<div class="profile-label">Affichage</div>', unsafe_allow_html=True)
+        mobile_view = st.segmented_control(
+            "Affichage",
+            MOBILE_VIEW_OPTIONS,
+            default=MOBILE_VIEW_CARDS,
+            key="mobile_view_selector",
+            label_visibility="collapsed",
+            width="stretch",
+        )
+    is_table_view = mobile_view == MOBILE_VIEW_TABLE
+    view_class = "view-table" if is_table_view else "view-cards"
+    sort_hidden_class = " is-hidden" if is_table_view else ""
+
     # Generate headers compatible with JS sorting
     def build_th(label, sort_type="num"):
         return f"<th class='sort-btn' data-type='{sort_type}' data-dir='none'>{label} <span class='icon' style='opacity: 0.3; font-size: 0.85em; margin-left: 3px;'>↕</span></th>"
@@ -598,8 +753,8 @@ else:
     
     # Mobile Sort View Injector
     st.markdown(
-        """
-        <div class='mobile-sort-container'>
+        f"""
+        <div class='mobile-sort-container{sort_hidden_class}'>
             <label for='mobile-sort-select'>Trier par :</label>
             <select id='mobile-sort-select'>
                 <option value='0' data-dir='asc' data-type='num'>Place</option>
@@ -668,7 +823,7 @@ else:
         
     st.markdown(
         f"""
-        <div class='ranking-scroll'>
+        <div class='ranking-scroll {view_class}'>
             <table class='ranking-table'>
                 <thead><tr>{th_html}</tr></thead>
                 <tbody>{"".join(table_rows)}</tbody>
@@ -768,12 +923,4 @@ else:
         width=0,
     )
 
-st.markdown(
-    "**Licence Open Source (GNU GPL v3) :** Cet outil est distribué sous licence libre GNU GPL v3. "
-    "Toute redistribution de ce projet ou de ses œuvres dérivées doit être effectuée sous cette même licence, "
-    "conserver l'accès libre au code source et aux formules, et maintenir les crédits d'origine. "
-    "Les données publiques de marché utilisées proviennent notamment de [Louve Invest](https://www.louveinvest.com/scpi/liste-scpi).\n\n"
-    "**Avertissement de responsabilité :** Cet outil est un support quantitatif d'analyse et de décision fondé sur des données publiques et des modèles mathématiques de pondération pour calculer des scores et établir un classement. "
-    "Il ne constitue en aucun cas un conseil en investissement ni une activité de démarchage financier au sens de la réglementation de l'AMF. "
-    "Il n'a pas vocation à fournir un conseil personnalisé. Les performances passées ne préjugent pas des performances futures."
-)
+render_footer()

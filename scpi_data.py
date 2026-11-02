@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import urllib.parse
+import unicodedata
 import urllib.request
 from typing import Any
 
@@ -14,6 +15,10 @@ WORKSHEETS = {
     "data": "Data",
     "scores": "Scores",
 }
+# Weights tab: two header rows (category, criterion) then one row per profile.
+WEIGHTS_WORKSHEET = "Pondérations"
+WEIGHTS_HEADER_ROWS = 2
+UNCATEGORIZED_LABEL = "Autres critères"
 
 CATEGORY_ORDER = [
     "Structure financière",
@@ -29,7 +34,7 @@ class SheetLoadError(RuntimeError):
     """Raised when a configured worksheet cannot be loaded."""
 
 
-def _csv_url(sheet_id: str, worksheet: str) -> str:
+def _csv_url(sheet_id: str, worksheet: str, header_rows: int | None = None) -> str:
     if not sheet_id or any(
         not character.isascii() or not (character.isalnum() or character in "-_")
         for character in sheet_id
@@ -40,15 +45,17 @@ def _csv_url(sheet_id: str, worksheet: str) -> str:
         f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq"
         f"?tqx=out:csv&sheet={encoded_sheet}"
     )
+    if header_rows is not None:
+        url += f"&headers={int(header_rows)}"
     parsed_url = urllib.parse.urlsplit(url)
     if parsed_url.scheme != "https" or parsed_url.hostname != "docs.google.com":
         raise SheetLoadError("La source Google Sheets doit utiliser HTTPS.")
     return url
 
 
-def _read_google_csv(sheet_id: str, worksheet: str) -> str:
+def _read_google_csv(sheet_id: str, worksheet: str, header_rows: int | None = None) -> str:
     request = urllib.request.Request(
-        _csv_url(sheet_id, worksheet),
+        _csv_url(sheet_id, worksheet, header_rows),
         headers={"User-Agent": "SCPIScreen/1.0"},
     )
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler())
@@ -204,3 +211,110 @@ def build_rankings(data: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]
         }
         results.append(item)
     return results
+
+
+def _text_key(value: Any) -> str:
+    """Normalize a label for tolerant comparison (case, accents, spacing)."""
+    decomposed = unicodedata.normalize("NFKD", str(value))
+    stripped = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return " ".join(stripped.casefold().split())
+
+
+def load_weights_sheet(sheet_id: str, worksheet: str = WEIGHTS_WORKSHEET) -> list[list[str]]:
+    """Load the weights tab as raw rows (the header labels repeat, so no DictReader)."""
+    content = _read_google_csv(sheet_id, worksheet, header_rows=WEIGHTS_HEADER_ROWS)
+    rows = [[cell.strip() for cell in row] for row in csv.reader(io.StringIO(content))]
+    if not any(any(row) for row in rows):
+        raise SheetLoadError(f"L’onglet « {worksheet} » est vide ou mal nommé.")
+    return rows
+
+
+def _split_category(label: str) -> tuple[str, str]:
+    """Split a merged "Category Criterion" header label into its two parts."""
+    normalized = " ".join(label.split())
+    for category in CATEGORY_ORDER:
+        prefix = f"{category} "
+        if normalized.casefold().startswith(prefix.casefold()):
+            return category, normalized[len(prefix):].strip()
+    return "", normalized
+
+
+def build_weight_matrix(rows: list[list[str]]) -> dict[str, Any]:
+    """Turn the raw weights tab into profiles, categories and weighted criteria.
+
+    Two layouts are supported, because Google's CSV endpoint may either merge the
+    two header rows into one label per column ("Category Criterion") or return
+    the "Catégorie" and "Critère" rows untouched.
+    """
+    profile_keys = {_text_key(profile): profile for profile in PROFILE_ORDER}
+    category_row: list[str] | None = None
+    criteria_row: list[str] | None = None
+    header_row: list[str] | None = None
+    profile_rows: dict[str, list[str]] = {}
+
+    for row in rows:
+        if not any(row):
+            continue
+        label_key = _text_key(row[0])
+        if label_key in profile_keys:
+            profile_rows.setdefault(profile_keys[label_key], row)
+        elif label_key == "critere" and criteria_row is None:
+            criteria_row = row
+        elif label_key == "categorie" and category_row is None:
+            category_row = row
+        elif header_row is None and not profile_rows:
+            header_row = row
+
+    if not profile_rows:
+        raise SheetLoadError(
+            "Aucune ligne de profil (Équilibre, Stabilité…) trouvée dans l’onglet « Pondérations »."
+        )
+
+    # Each column: (column index, category, criterion name).
+    columns: list[tuple[int, str, str]] = []
+    if criteria_row is not None:
+        for index in range(1, len(criteria_row)):
+            criterion = " ".join(criteria_row[index].split())
+            category = ""
+            if category_row is not None and index < len(category_row):
+                category = " ".join(category_row[index].split())
+            columns.append((index, category, criterion))
+    elif header_row is not None:
+        for index in range(1, len(header_row)):
+            category, criterion = _split_category(header_row[index])
+            columns.append((index, category, criterion))
+    columns = [
+        column for column in columns if column[2] and _text_key(column[2]) != "total"
+    ]
+    if not columns:
+        raise SheetLoadError("Aucun critère trouvé dans l’onglet « Pondérations ».")
+
+    profiles = [profile for profile in PROFILE_ORDER if profile in profile_rows]
+    weights_by_profile: dict[str, list[float]] = {}
+    for profile in profiles:
+        row = profile_rows[profile]
+        values = [
+            max(0.0, _number("".join(row[index].split()))) if index < len(row) else 0.0
+            for index, _, _ in columns
+        ]
+        # Fractions such as 0.04 (instead of 4 %) are converted to percentages.
+        if 0 < sum(values) <= 1.5:
+            values = [value * 100 for value in values]
+        weights_by_profile[profile] = values
+
+    criteria = [
+        {
+            "name": criterion,
+            "category": category or UNCATEGORIZED_LABEL,
+            "weights": {profile: weights_by_profile[profile][position] for profile in profiles},
+        }
+        for position, (_, category, criterion) in enumerate(columns)
+    ]
+
+    found_categories = [criterion["category"] for criterion in criteria]
+    categories = [category for category in CATEGORY_ORDER if category in found_categories]
+    for category in found_categories:
+        if category not in categories:
+            categories.append(category)
+
+    return {"profiles": profiles, "categories": categories, "criteria": criteria}
