@@ -184,6 +184,12 @@ st.markdown(
     html[data-theme="dark"] [data-testid="stButton"] button:hover { background: #214541; }
     
     /* Page navigation and mobile view toggle */
+    /* Search field with an inline clear button */
+    .st-key-search_box { position: relative; }
+    .st-key-search_box input { padding-right: 2.6rem; }
+    .st-key-search_clear { position: absolute; top: 50%; right: .45rem; z-index: 5; width: auto; transform: translateY(-50%); }
+    .st-key-search_clear [data-testid="stButton"] button { min-height: 1.9rem !important; min-width: 1.9rem; padding: 0 .5rem; border: 0 !important; border-radius: 8px; color: var(--muted) !important; background: transparent !important; font-size: .85rem; line-height: 1; transform: none; }
+    .st-key-search_clear [data-testid="stButton"] button:hover, .st-key-search_clear [data-testid="stButton"] button:focus-visible { color: var(--ink) !important; background: var(--blue-pale) !important; transform: none; }
     .st-key-page_navigation { margin-bottom: .35rem; }
     .st-key-mobile_view_toolbar { display: none !important; }
     .mobile-hint { display: none; }
@@ -704,19 +710,29 @@ else:
             unsafe_allow_html=True,
         )
     with col_search:
-        if HAS_KEYUP:
-            search_query = st_keyup(
-                "Recherche",
-                placeholder="🔍 Rechercher une SCPI...",
-                label_visibility="collapsed",
-                debounce=250 
-            )
-        else:
-            search_query = st.text_input(
-                "Recherche",
-                placeholder="🔍 Rechercher une SCPI... (Appuyez sur Entrée)",
-                label_visibility="collapsed"
-            )
+        # Changing the widget key resets the field, which is how the clear button empties it.
+        search_reset_count = st.session_state.setdefault("search_reset_count", 0)
+        search_key = f"scpi_search_{search_reset_count}"
+        with st.container(key="search_box"):
+            if HAS_KEYUP:
+                search_query = st_keyup(
+                    "Recherche",
+                    placeholder="🔍 Rechercher une SCPI...",
+                    label_visibility="collapsed",
+                    debounce=250,
+                    key=search_key,
+                )
+            else:
+                search_query = st.text_input(
+                    "Recherche",
+                    placeholder="🔍 Rechercher une SCPI... (Appuyez sur Entrée)",
+                    label_visibility="collapsed",
+                    key=search_key,
+                )
+            # Overlaid on the right of the field by CSS; only shown when there is text to clear.
+            if search_query and st.button("✕", key="search_clear", help="Effacer la recherche"):
+                st.session_state["search_reset_count"] = search_reset_count + 1
+                st.rerun()
     
     # Mobile only (hidden by CSS on desktop): choose between cards and a scrollable table
     with st.container(key="mobile_view_toolbar"):
