@@ -1,15 +1,20 @@
-"""Google Sheets loading and SCPI scoring helpers."""
+"""Google Sheets loading, validation and SCPI scoring helpers."""
 
 from __future__ import annotations
 
 import csv
 import io
-import urllib.parse
+import logging
+import math
 import unicodedata
+import urllib.parse
 import urllib.request
 from typing import Any
 
-# Paste the Google Sheets document ID here. Leave empty to use sample data.
+logger = logging.getLogger("scpiscreen.data")
+
+# Paste the Google Sheets document ID here. The sheet must be shared as
+# "Anyone with the link" with the Viewer role only.
 SHEET_ID = "10RwJl0A2dvoHjY6LmOFQvT7nghF3-n73hf-Aa9FJBtE"
 WORKSHEETS = {
     "data": "Data",
@@ -28,10 +33,35 @@ CATEGORY_ORDER = [
     "Rentabilité",
 ]
 PROFILE_ORDER = ["Équilibre", "Stabilité", "Performance", "Assurance-vie", "Nue-Propriété"]
+PROFILE_SCORE_COLUMNS = {
+    "Équilibre": "Note Equilibre",
+    "Stabilité": "Note Stabilité",
+    "Performance": "Note Performance",
+    "Assurance-vie": "Note Assurance-vie",
+    "Nue-Propriété": "Note Nue-Propriété",
+}
+# Every score column the Scores tab should provide.
+SCORE_COLUMNS = [*PROFILE_SCORE_COLUMNS.values(), *CATEGORY_ORDER]
+SCORE_MIN = 0.0
+SCORE_MAX = 100.0
+
+SHEET_HOST = "docs.google.com"
+SHEET_TIMEOUT_SECONDS = 12
 MAX_SHEET_RESPONSE_BYTES = 8 * 1024 * 1024
 
+
 class SheetLoadError(RuntimeError):
-    """Raised when a configured worksheet cannot be loaded."""
+    """Raised when a configured worksheet cannot be loaded. The message is safe to display."""
+
+
+class _SheetRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only towards the Google Sheets host, over HTTPS."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        target = urllib.parse.urlsplit(newurl)
+        if target.scheme != "https" or target.hostname != SHEET_HOST:
+            raise SheetLoadError("La source Google Sheets a tenté une redirection non autorisée.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _csv_url(sheet_id: str, worksheet: str, header_rows: int | None = None) -> str:
@@ -42,13 +72,13 @@ def _csv_url(sheet_id: str, worksheet: str, header_rows: int | None = None) -> s
         raise SheetLoadError("L’identifiant du Google Sheet est invalide.")
     encoded_sheet = urllib.parse.quote(worksheet, safe="")
     url = (
-        f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq"
+        f"https://{SHEET_HOST}/spreadsheets/d/{sheet_id}/gviz/tq"
         f"?tqx=out:csv&sheet={encoded_sheet}"
     )
     if header_rows is not None:
         url += f"&headers={int(header_rows)}"
     parsed_url = urllib.parse.urlsplit(url)
-    if parsed_url.scheme != "https" or parsed_url.hostname != "docs.google.com":
+    if parsed_url.scheme != "https" or parsed_url.hostname != SHEET_HOST:
         raise SheetLoadError("La source Google Sheets doit utiliser HTTPS.")
     return url
 
@@ -58,23 +88,38 @@ def _read_google_csv(sheet_id: str, worksheet: str, header_rows: int | None = No
         _csv_url(sheet_id, worksheet, header_rows),
         headers={"User-Agent": "SCPIScreen/1.0"},
     )
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler())
+    opener = urllib.request.build_opener(_SheetRedirectHandler())
     try:
-        with opener.open(request, timeout=12) as response:
+        with opener.open(request, timeout=SHEET_TIMEOUT_SECONDS) as response:
+            final_host = urllib.parse.urlsplit(response.geturl()).hostname
+            content_type = response.headers.get_content_type()
             content = response.read(MAX_SHEET_RESPONSE_BYTES + 1)
+    except SheetLoadError:
+        raise
     except Exception as error:
-        raise SheetLoadError(
-            f"Impossible de lire l’onglet « {worksheet} » : {error}"
-        ) from error
+        # Details stay in the server log; the visitor gets a generic message.
+        logger.warning("Google Sheet request failed for %r: %s", worksheet, error)
+        raise SheetLoadError(f"Impossible de lire l’onglet « {worksheet} ».") from error
 
+    if final_host != SHEET_HOST:
+        raise SheetLoadError(f"L’onglet « {worksheet} » a été servi depuis un hôte inattendu.")
+    if content_type == "text/html":
+        # A private sheet returns a sign-in page instead of CSV.
+        raise SheetLoadError(f"L’onglet « {worksheet} » n’est pas accessible publiquement.")
     if len(content) > MAX_SHEET_RESPONSE_BYTES:
         raise SheetLoadError(f"L’onglet « {worksheet} » dépasse la taille autorisée.")
-    return content.decode("utf-8-sig")
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise SheetLoadError(f"L’onglet « {worksheet} » n’est pas un texte UTF-8 valide.") from error
 
 
 def _read_sheet(sheet_id: str, worksheet: str) -> list[dict[str, str]]:
     content = _read_google_csv(sheet_id, worksheet)
-    rows = list(csv.DictReader(io.StringIO(content)))
+    try:
+        rows = list(csv.DictReader(io.StringIO(content)))
+    except csv.Error as error:
+        raise SheetLoadError(f"L’onglet « {worksheet} » n’est pas un CSV valide.") from error
     if not rows:
         raise SheetLoadError(f"L’onglet « {worksheet} » est vide ou mal nommé.")
     return [
@@ -88,6 +133,10 @@ def load_google_sheet(sheet_id: str, worksheets: dict[str, str]) -> dict[str, li
     data: dict[str, list[dict[str, str]]] = {}
     for key, tab_name in worksheets.items():
         data[key] = _read_sheet(sheet_id, tab_name)
+    data_rows = data.get("data", [])
+    if data_rows and "SCPI" not in data_rows[0]:
+        data_tab = worksheets.get("data", "Data")
+        raise SheetLoadError(f"La colonne « SCPI » est absente de l’onglet « {data_tab} ».")
     return data
 
 
@@ -99,6 +148,19 @@ def _number(value: Any, default: float = 0.0) -> float:
         return float(normalized)
     except ValueError:
         return default
+
+
+def parse_score(value: Any) -> float | None:
+    """Parse a score cell. Return None when the cell is empty or not a finite number."""
+    text = "" if value is None else str(value)
+    normalized = text.strip().replace("%", "").replace(" ", "").replace(",", ".")
+    if not normalized:
+        return None
+    try:
+        number = float(normalized)
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _name_key(value: Any) -> str:
@@ -148,16 +210,9 @@ def build_rankings(data: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]
         if not score_row and scores_are_row_aligned:
             score_row = score_rows[row_index]
             name = score_row.get("Catégorie SCPI", "").strip() or name
-        profile_columns = {
-            "Équilibre": "Note Equilibre",
-            "Stabilité": "Note Stabilité",
-            "Performance": "Note Performance",
-            "Assurance-vie": "Note Assurance-vie",
-            "Nue-Propriété": "Note Nue-Propriété", 
-        }
         profile_scores = {
             profile: _number(score_row.get(column, 0.0))
-            for profile, column in profile_columns.items()
+            for profile, column in PROFILE_SCORE_COLUMNS.items()
         }
         category_scores = {
             "Structure financière": _number(score_row.get("Structure financière", 0.0)),
@@ -213,6 +268,40 @@ def build_rankings(data: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]
     return results
 
 
+def validate_scores(data: dict[str, list[dict[str, str]]]) -> list[str]:
+    """Return human-readable warnings about the Scores tab (empty list when all is well)."""
+    score_rows = data.get("scores", [])
+    if not score_rows:
+        return []
+    headers = score_rows[0].keys()
+    messages: list[str] = []
+    for column in ["Catégorie SCPI", *SCORE_COLUMNS]:
+        if column not in headers:
+            messages.append(f"La colonne « {column} » est absente de l’onglet « Scores ».")
+
+    invalid_labels: dict[str, list[str]] = {}
+    for row in score_rows:
+        label = row.get("Catégorie SCPI", "").strip()
+        if not label:
+            continue  # Blank spreadsheet rows are not SCPI rows.
+        for column in SCORE_COLUMNS:
+            if column not in headers:
+                continue
+            value = parse_score(row.get(column))
+            if value is None or not SCORE_MIN <= value <= SCORE_MAX:
+                invalid_labels.setdefault(column, []).append(label)
+
+    for column, labels in invalid_labels.items():
+        listed = ", ".join(labels[:5])
+        remaining = len(labels) - 5
+        suffix = f" et {remaining} autre(s)" if remaining > 0 else ""
+        messages.append(
+            f"Valeur absente ou hors de 0 à 100 dans « {column} » pour : {listed}{suffix}. "
+            "Cette valeur est comptée comme 0."
+        )
+    return messages
+
+
 def _text_key(value: Any) -> str:
     """Normalize a label for tolerant comparison (case, accents, spacing)."""
     decomposed = unicodedata.normalize("NFKD", str(value))
@@ -220,10 +309,18 @@ def _text_key(value: Any) -> str:
     return " ".join(stripped.casefold().split())
 
 
+def text_key(value: Any) -> str:
+    """Public alias of the tolerant label normalization, used for sorting."""
+    return _text_key(value)
+
+
 def load_weights_sheet(sheet_id: str, worksheet: str = WEIGHTS_WORKSHEET) -> list[list[str]]:
     """Load the weights tab as raw rows (the header labels repeat, so no DictReader)."""
     content = _read_google_csv(sheet_id, worksheet, header_rows=WEIGHTS_HEADER_ROWS)
-    rows = [[cell.strip() for cell in row] for row in csv.reader(io.StringIO(content))]
+    try:
+        rows = [[cell.strip() for cell in row] for row in csv.reader(io.StringIO(content))]
+    except csv.Error as error:
+        raise SheetLoadError(f"L’onglet « {worksheet} » n’est pas un CSV valide.") from error
     if not any(any(row) for row in rows):
         raise SheetLoadError(f"L’onglet « {worksheet} » est vide ou mal nommé.")
     return rows

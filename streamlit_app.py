@@ -1,13 +1,15 @@
 import html
-import hashlib
-import hmac
+import inspect
+import logging
 import os
+import re
 import time
-from urllib.parse import quote, urlencode
+from datetime import datetime
 from typing import Any
-import streamlit.components.v1 as components
+
 import extra_streamlit_components as stx
 import streamlit as st
+import streamlit.components.v1 as components
 
 try:
     from st_keyup import st_keyup
@@ -15,6 +17,8 @@ try:
 except ImportError:
     HAS_KEYUP = False
 
+import access_control
+from method_page import build_method_page_html
 from scpi_data import (
     CATEGORY_ORDER,
     PROFILE_ORDER,
@@ -25,8 +29,8 @@ from scpi_data import (
     build_weight_matrix,
     load_google_sheet,
     load_weights_sheet,
+    validate_scores,
 )
-from method_page import build_method_page_html
 
 st.set_page_config(
     page_title="SCPIScreen",
@@ -35,11 +39,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ---- Page styles (the ranking table has its own styles inside its frame) -----
+
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap');
-    
+    /* Self-hosted variable fonts: see README, static/fonts/. */
+    @font-face { font-family: 'DM Sans'; font-style: normal; font-weight: 400 700; font-display: swap; src: url('/app/static/fonts/DMSans-Variable.ttf') format('truetype'); }
+    @font-face { font-family: 'Fraunces'; font-style: normal; font-weight: 500 600; font-display: swap; src: url('/app/static/fonts/Fraunces-Variable.ttf') format('truetype'); }
+
     :root {
         color-scheme: light;
         --ink: #152a40;
@@ -71,21 +79,21 @@ st.markdown(
         --surface-soft: #1d303a;
         --shadow-card: 0 18px 48px rgba(0, 0, 0, .2);
     }
-    
+
     .stApp {
         background: radial-gradient(ellipse at 5% 0%, rgba(8, 126, 116, .055), transparent 35rem), var(--paper);
         color: var(--ink);
     }
     .stApp::before { content: ''; position: fixed; z-index: 1000; top: 0; left: 0; width: 100%; height: 3px; background: linear-gradient(90deg, #087e74, #83dbc1 60%, #c2f1df); }
-    
+
     [data-testid="stMainBlockContainer"] { max-width: 1440px; padding: clamp(1.4rem, 4vw, 3.5rem) clamp(1rem, 4.8vw, 4.5rem) 4rem; }
     [data-testid="stHeader"] { background: color-mix(in srgb, var(--paper) 88%, transparent); }
-    
+
     h1, h2, h3 { color: var(--ink); }
     h1 { max-width: 850px; margin: .55rem 0 .45rem !important; font-family: 'Fraunces', Georgia, serif !important; font-size: 3rem !important; font-weight: 500 !important; line-height: 1.08 !important; letter-spacing: -.045em !important; }
     h2, h3 { font-family: 'DM Sans', sans-serif !important; letter-spacing: -.025em !important; font-weight: 650 !important; }
     p, label, div, span { font-family: 'DM Sans', sans-serif; }
-    
+
     /* Masthead */
     .masthead { position: relative; overflow: hidden; margin: .2rem 0 1.7rem; padding: clamp(1.5rem, 3vw, 2.5rem); border: 1px solid rgba(176, 220, 216, .18); border-radius: 22px; color: #f5f9fd; background: radial-gradient(ellipse at 88% 0%, rgba(77, 190, 165, .2), transparent 25rem), linear-gradient(125deg, #102b46 0%, #153c55 100%); box-shadow: 0 24px 60px rgba(16, 43, 70, .16); }
     .masthead::after { content: ''; position: absolute; right: -3rem; top: -8rem; width: 27rem; height: 27rem; border: 1px solid rgba(188, 236, 223, .15); border-radius: 50%; box-shadow: 0 0 0 3rem rgba(188, 236, 223, .045), 0 0 0 6rem rgba(188, 236, 223, .025); pointer-events: none; }
@@ -97,93 +105,31 @@ st.markdown(
     .masthead-title { max-width: 780px; color: #fff; font-family: 'Fraunces', Georgia, serif; font-size: clamp(2rem, 4vw, 3.15rem); letter-spacing: -.04em; font-weight: 500; line-height: 1.12; }
     .masthead-lede { max-width: 42rem; margin-top: .6rem; color: #c4d4e2; font-size: .98rem; line-height: 1.5; }
     .masthead-tools { display: flex; align-items: center; gap: .55rem; flex: 0 0 auto; }
-    
-    .refresh-action { display: inline-flex; align-items: center; gap: .35rem; padding: .66rem .95rem; border: 1px solid #a9ebd4; border-radius: 10px; color: #103e3c !important; background: linear-gradient(135deg, #b9f0dc, #8edfc7); font-size: .82rem; font-weight: 700; text-decoration: none !important; white-space: nowrap; box-shadow: 0 5px 16px rgba(1, 15, 26, .16); transition: transform .18s ease, box-shadow .18s ease, background .18s ease; }
-    .refresh-action:hover, .refresh-action:focus, .refresh-action:visited { border-color: #d2f8e9; color: #103e3c !important; background: #d2f8e9; box-shadow: 0 8px 20px rgba(1, 15, 26, .22); transform: translateY(-1px); text-decoration: none !important; }
     .source-badge { flex: 0 0 auto; padding: .58rem .78rem; border: 1px solid rgba(210,231,246,.22); border-radius: 999px; color: #deebf5; background: rgba(255,255,255,.06); font-size: .62rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-    
+
     /* Controls */
     .profile-label { margin: .15rem 0 .55rem; color: var(--muted); font-size: .65rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
     [data-testid="stSegmentedControl"] { margin-bottom: .5rem; }
     [data-testid="stSegmentedControl"] > div { padding: .28rem; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); box-shadow: 0 5px 18px rgba(20, 48, 67, .045); }
     [data-testid="stSegmentedControl"] button { min-height: 2.7rem; border-radius: 9px !important; font-size: .82rem !important; font-weight: 600 !important; transition: color .16s ease, background .16s ease, box-shadow .16s ease; }
     [data-testid="stSegmentedControl"] button[aria-pressed="true"] { border-color: #b8e6d8 !important; color: #075d56 !important; background: #e3f5ee !important; box-shadow: 0 2px 7px rgba(8, 126, 116, .1) !important; }
-    [data-testid="stToggle"] [role="switch"]:focus-visible { outline: 3px solid rgba(22,119,255,.35) !important; outline-offset: 2px; }
-    [data-testid="stToggle"] [role="switch"][aria-checked="true"] { background: #087e74 !important; border-color: #087e74 !important; }
-    
+
     .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 1.8rem 0 .9rem; }
     .section-kicker { color: var(--blue); font-size: .66rem; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
     .section-title { margin-top: .3rem; color: var(--ink); font-family: 'DM Sans', sans-serif; font-size: 1.35rem; font-weight: 700; letter-spacing: -.035em; }
-    
-    /* Table Desktop */
-    .ranking-scroll { width: 100%; overflow-x: auto; overflow-y: auto; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow-card); }
-    .ranking-table { width: 100%; min-width: 1250px; border-collapse: separate; border-spacing: 0; }
-    .ranking-table th { position: sticky; top: 0; z-index: 1; color: #dce9f5; background: #15364f; text-align: center; text-transform: uppercase; font-size: .64rem; font-weight: 700; letter-spacing: .12em; padding: 1rem 1.1rem; border-bottom: 1px solid #315a80; border-color: rgba(188, 236, 223, .16); white-space: nowrap; transition: background-color 0.2s ease; cursor: pointer; user-select: none; }
-    .ranking-table th:hover { background: #1a4261; }
-    .ranking-table th:first-child { padding-left: 1.2rem; border-top-left-radius: 16px; }
-    .ranking-table th:last-child { border-top-right-radius: 16px; }
-    .ranking-table td { padding: 1rem 1.1rem; border-bottom: 1px solid var(--line); font-size: .84rem; line-height: 1.5; vertical-align: middle; color: var(--ink); }
-    .ranking-table tr:last-child td { border-bottom: 0; }
-    .ranking-table tbody tr { transition: background-color .16s ease; }
-    .ranking-table tbody tr:hover { background: #f0f8f5; }
-    
-    /* Table Utils */
-    .rank-number { color: #8a9aa8; font-size: .78rem !important; font-weight: 700; font-variant-numeric: tabular-nums; }
-    .rank-first { color: #087e74; }
-    .company-link { color: var(--ink); font-weight: 700; text-decoration: none; text-underline-offset: 4px; }
-    .company-link:hover { color: var(--blue); text-decoration: underline; }
-    .data-chip { display: inline-block; padding: .34rem .58rem; border: 1px solid #e6eeeb; border-radius: 999px; background: #f4f8f7; color: #435b68; font-size: .75rem; line-height: 1.45; }
-    .discount-value { color: var(--ink); font-size: .83rem; font-weight: 600; font-variant-numeric: tabular-nums; }
-    .score-pill { display: inline-flex; align-items: center; justify-content: center; padding: .2rem .45rem; font-size: .75rem; font-weight: 700; font-variant-numeric: tabular-nums; border-radius: 6px; line-height: 1; }
-    
-    /* Categories */
-    .category-green-vivid { color: #075c4a; background: #aee9ce; }
-    .category-green-pale { color: #176747; background: #e0f4e8; }
-    .category-yellow { color: #735500; background: #fff1bf; }
-    .category-orange { color: #78410f; background: #f9d6ae; }
-    .category-red { color: #fff; background: #c84d51; }
-    .category-unavailable { color: var(--muted); background: #e9eef3; }
-    
-    /* Single SCPI Card */
-    .scpi-card { margin: .9rem 0 1rem; padding: clamp(1.2rem, 3vw, 2rem); border: 1px solid var(--line); border-radius: 20px; background: var(--surface); box-shadow: var(--shadow-card); }
-    .card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; padding-bottom: 1.25rem; border-bottom: 1px solid var(--line); }
-    .card-name { font-family: 'Fraunces', Georgia, serif; font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.2; color: var(--ink); letter-spacing: -.035em; }
-    .card-meta { color: var(--muted); font-size: .82rem; margin-top: .28rem; }
-    .category-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .75rem; padding: 1.1rem 0; border-bottom: 1px solid var(--line); }
-    .category-item { display: flex; align-items: center; gap: .55rem; min-width: 0; }
-    .category-dot { display: inline-flex; align-items: center; justify-content: center; min-width: 3.6rem; height: 2.35rem; flex: 0 0 auto; padding: 0 .35rem; border-radius: 9px; font-size: .68rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-    .category-label { color: var(--muted); font-size: .7rem; line-height: 1.2; }
-    .fact-grid { margin-top: 1.1rem; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .8rem; }
-    .fact-cell { padding: 1rem; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); transition: border-color .16s ease, transform .16s ease; }
-    .fact-cell:hover { border-color: #a9d9cc; transform: translateY(-1px); }
-    .fact-label { color: var(--muted); font-size: .66rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-    .fact-value { margin-top: .25rem; color: var(--ink); font-size: .9rem; font-weight: 600; line-height: 1.45; }
-    
+
     /* Buttons & Inputs */
     [data-testid="stButton"] button { min-height: 2.75rem; border-radius: 10px; border-color: #c8dcda; color: #096b64; font-weight: 650; transition: transform .16s ease, background .16s ease, border-color .16s ease; }
     [data-testid="stButton"] button:hover { border-color: #79bfb1; background: var(--blue-pale); color: #075d56; transform: translateY(-1px); }
     [data-testid="stForm"] { padding: clamp(1rem, 3vw, 1.5rem); border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-card); }
     [data-testid="stTextInput"] input { min-height: 3rem; border-radius: 10px; border-color: var(--line); background: var(--surface); }
-    
-    /* Dark Mode Overrides */
+
     html[data-theme="dark"] .stApp { background: radial-gradient(ellipse at 5% 0%, rgba(63, 181, 151, .08), transparent 35rem), var(--paper); }
     html[data-theme="dark"] [data-testid="stHeader"] { background: rgba(16, 27, 36, .9); }
-    html[data-theme="dark"] .ranking-table th { background: #15364a; }
-    html[data-theme="dark"] .ranking-table th:hover { background: #1c4660; }
-    html[data-theme="dark"] .ranking-table td { border-color: #30424e; }
-    html[data-theme="dark"] .ranking-table tbody tr:hover { background: #203a42; }
-    html[data-theme="dark"] .data-chip { border-color: var(--line); background: #203640; color: #d7e5e7; }
     html[data-theme="dark"] [data-testid="stSegmentedControl"] button[aria-pressed="true"] { border-color: #37675e !important; color: #b6efdc !important; background: #23463f !important; }
-    html[data-theme="dark"] .category-green-vivid { color: #063c35; background: #8cddbb; }
-    html[data-theme="dark"] .category-green-pale { color: #b9efd0; background: #28523e; }
-    html[data-theme="dark"] .category-yellow { color: #f4dfa1; background: #51451f; }
-    html[data-theme="dark"] .category-orange { color: #f7d1a7; background: #553b27; }
-    html[data-theme="dark"] .category-red { color: #fff; background: #a63e47; }
-    html[data-theme="dark"] .category-unavailable { background: #354653; }
     html[data-theme="dark"] [data-testid="stButton"] button { border-color: #3a5a63; color: #9de0cf; }
     html[data-theme="dark"] [data-testid="stButton"] button:hover { background: #214541; }
-    
-    /* Page navigation and mobile view toggle */
+
     /* Search field with an inline clear button */
     .st-key-search_box { position: relative; }
     .st-key-search_box input { padding-right: 2.6rem; }
@@ -191,8 +137,11 @@ st.markdown(
     .st-key-search_clear [data-testid="stButton"] button { min-height: 1.9rem !important; min-width: 1.9rem; padding: 0 .5rem; border: 0 !important; border-radius: 8px; color: var(--muted) !important; background: transparent !important; font-size: .85rem; line-height: 1; transform: none; }
     .st-key-search_clear [data-testid="stButton"] button:hover, .st-key-search_clear [data-testid="stButton"] button:focus-visible { color: var(--ink) !important; background: var(--blue-pale) !important; transform: none; }
     .st-key-page_navigation { margin-bottom: .35rem; }
+
+    /* Desktop table frame and mobile frame: exactly one is visible */
+    .st-key-ranking_desktop { display: block; }
+    .st-key-ranking_mobile { display: none; }
     .st-key-mobile_view_toolbar { display: none !important; }
-    .mobile-hint { display: none; }
 
     /* Method page */
     .method-intro { max-width: 52rem; margin: .2rem 0 1.2rem; color: var(--muted); font-size: .98rem; line-height: 1.6; }
@@ -232,42 +181,10 @@ st.markdown(
     }
 
     @media (max-width: 760px) {
-        /* Mobile ranking: cards / table toggle */
+        .st-key-ranking_desktop { display: none !important; }
+        .st-key-ranking_mobile { display: block !important; }
         .st-key-mobile_view_toolbar { display: flex !important; }
-        .mobile-sort-container.is-hidden { display: none !important; }
-        .ranking-scroll.view-table { border-radius: 14px; -webkit-overflow-scrolling: touch; }
-        .ranking-scroll.view-table .ranking-table th, .ranking-scroll.view-table .ranking-table td { padding: .75rem .8rem; }
-        .ranking-scroll.view-table .ranking-table td.cell-scpi { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line); }
-        .ranking-scroll.view-table .ranking-table th:nth-child(2) { left: 0; z-index: 3; }
 
-        /* Method page */
-        .method-steps, .profile-cards { grid-template-columns: 1fr; }
-        .method-intro { font-size: .9rem; }
-        .mobile-hint { display: block; margin: 0 0 .5rem; color: var(--muted); font-size: .75rem; }
-        .weights-table { min-width: 560px; }
-        .weights-table thead th { padding: .75rem .45rem; font-size: .58rem; letter-spacing: .05em; }
-        .weights-table tbody th, .weights-table tbody td { padding: .55rem .5rem; font-size: .78rem; }
-        .weights-table thead th:first-child, .weights-table tbody th { min-width: 9.5rem; max-width: 9.5rem; }
-        .weights-table tbody th.criterion-name { padding-left: .9rem; }
-    }
-
-    /* Hide some st default menus */
-    [data-testid="stMainMenuItem-recordScreencast"] { display: none !important; }
-    [data-testid="stMainMenuItem-print"] [data-testid="stMainMenuItemLabel"] { font-size: 0; }
-    [data-testid="stMainMenuItem-print"] [data-testid="stMainMenuItemLabel"]::after { content: "Imprimer"; font-size: .875rem; }
-    [data-testid="stMainMenuItem-rerun"] [data-testid="stMainMenuItemLabel"], [data-testid="stMainMenuItem-clearCache"] [data-testid="stMainMenuItemLabel"] { font-size: 0; }
-    [data-testid="stMainMenuItem-rerun"] [data-testid="stMainMenuItemLabel"]::after { content: "Relancer"; font-size: .875rem; }
-    [data-testid="stMainMenuItem-clearCache"] [data-testid="stMainMenuItemLabel"]::after { content: "Vider le cache"; font-size: .875rem; }
-    [data-testid="stMainMenuItem-theme-System"], [data-testid="stMainMenuItem-theme-Light"], [data-testid="stMainMenuItem-theme-Dark"] { font-size: 0; }
-    [data-testid="stMainMenuItem-theme-System"]::after { content: "Système"; font-size: .875rem; }
-    [data-testid="stMainMenuItem-theme-Light"]::after { content: "Jour"; font-size: .875rem; }
-    [data-testid="stMainMenuItem-theme-Dark"]::after { content: "Nuit"; font-size: .875rem; }
-
-    /* Mobile Sort Component styling */
-    .mobile-sort-container { display: none; }
-    
-    /* MOBILE VIEW */
-    @media (max-width: 760px) {
         [data-testid="stMainBlockContainer"] { padding: .85rem .85rem 2.5rem; }
         .masthead { margin-bottom: 1.25rem; padding: 1.2rem 1.1rem 1.3rem; border-radius: 18px; }
         .masthead-body { flex-direction: column; gap: 1rem; margin-top: 1.35rem; align-items: flex-start; }
@@ -276,139 +193,328 @@ st.markdown(
         .masthead-tools { flex-wrap: wrap; }
         .source-badge { display: none; }
         [data-testid="stSegmentedControl"] button { min-height: 2.8rem; font-size: .76rem !important; }
-        
         .section-heading { margin-top: 1.3rem; margin-bottom: 0.5rem; }
-        .mobile-sort-container {
-            display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.8rem;
-        }
-        .mobile-sort-container label { font-size: 0.8rem; font-weight: bold; color: var(--muted); margin: 0; }
-        #mobile-sort-select {
-            padding: 0.35rem 0.5rem; border-radius: 8px; border: 1px solid var(--line);
-            background: var(--surface); color: var(--ink); font-size: 0.85rem; flex: 1; outline: none;
-        }
-        
-        .category-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
-        .indicator-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .fact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
-        .fact-cell { padding: .8rem; border-radius: 10px; }
-        .scpi-card { padding: 1.1rem; border-radius: 17px; }
-        
-        /* Table overrides for mobile (Flex Layout) */
-        .ranking-scroll.view-cards { max-width: 100%; overflow: visible; border: 0; background: transparent; box-shadow: none; }
-        .ranking-scroll.view-cards .ranking-table, .ranking-scroll.view-cards .ranking-table tbody { display: block; width: 100%; min-width: 0; max-width: 100%; }
-        .ranking-scroll.view-cards .ranking-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
-        
-        .ranking-scroll.view-cards .ranking-table tbody tr {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: baseline;
-            gap: 0.15rem 0.4rem;
-            margin-bottom: 0.6rem;
-            padding: 0.6rem 0.75rem;
-            border: 1px solid var(--line);
-            border-radius: 12px;
-            background: var(--surface);
-            box-shadow: 0 4px 12px rgba(20, 48, 67, .04);
-        }
-        
-        .ranking-scroll.view-cards .ranking-table td { 
-            padding: 0; display: inline-flex; flex-direction: row; 
-            align-items: baseline; width: auto; border: none; overflow-wrap: anywhere;
-        }
-        
-        /* Optimization of labels space - replacing colons with simple space */
-        .ranking-scroll.view-cards .ranking-table td::before { 
-            content: attr(data-label) " "; font-size: .65rem; letter-spacing: .02em; 
-            margin-right: 0.15rem; font-weight: 700; text-transform: uppercase; color: var(--muted); 
-        }
-        
-        /* Start with the score first, then place, then title */
-        .ranking-scroll.view-cards .ranking-table .cell-place { order: 1; font-weight: bold; margin-right: 0.3rem; }
-        .ranking-scroll.view-cards .ranking-table .cell-place::before { content: "#"; margin-right: 0.1rem; font-size: .75rem; }
 
-        .ranking-scroll.view-cards .ranking-table .cell-scpi { order: 2; margin-right: 0.5rem; }
-        .ranking-scroll.view-cards .ranking-table .cell-scpi::before { content: none; }
-        .ranking-scroll.view-cards .ranking-table .cell-scpi .company-link { font-size: 1.05rem; }
-
-        .ranking-scroll.view-cards .ranking-table .cell-score { order: 3; flex: 1 1 auto; margin-bottom: 0.3rem; }
-        .ranking-scroll.view-cards .ranking-table .cell-score::before { content: none; }
-        
-        /* Make data chips tight */
-        .ranking-scroll.view-cards .ranking-table .cell-badge {
-            order: 4;
-            font-size: 0.75rem;
-            background: transparent;
-            padding: 0;
-            border: none;
-            margin-right: 0.5rem;
-            margin-bottom: 0.2rem;
-        }
-        
-        /* Remove specific pale green color for NP elements on mobile */
-        .ranking-scroll.view-cards .ranking-table .cell-np { background: transparent !important; border-color: transparent !important; }
-        html[data-theme="dark"] .ranking-scroll.view-cards .ranking-table .cell-np { background: transparent !important; border-color: transparent !important; }
-        
-        .ranking-scroll.view-cards .ranking-table .data-chip { width: auto; max-width: 100%; padding: 0; background: transparent; border: none; font-size: inherit; color: inherit; font-weight: 600; }
-        .ranking-scroll.view-cards .ranking-table .discount-value { font-size: inherit; font-weight: 600; }
-        
-        html[data-theme="dark"] .ranking-scroll.view-cards .ranking-table tbody tr { background: var(--surface); }
+        .method-steps, .profile-cards { grid-template-columns: 1fr; }
+        .method-intro { font-size: .9rem; }
+        .weights-table { min-width: 560px; }
+        .weights-table thead th { padding: .75rem .45rem; font-size: .58rem; letter-spacing: .05em; }
+        .weights-table tbody th, .weights-table tbody td { padding: .55rem .5rem; font-size: .78rem; }
+        .weights-table thead th:first-child, .weights-table tbody th { min-width: 9.5rem; max-width: 9.5rem; }
+        .weights-table tbody th.criterion-name { padding-left: .9rem; }
     }
-    
+
     @media (max-width: 420px) {
         [data-testid="stMainBlockContainer"] { padding-right: .65rem; padding-left: .65rem; }
         .profile-label { font-size: .6rem; }
         [data-testid="stSegmentedControl"] button { padding: .35rem .3rem !important; }
-        .category-grid { grid-template-columns: 1fr; }
-        .fact-grid { grid-template-columns: 1fr 1fr; }
-        .ranking-scroll.view-cards .ranking-table tbody tr { padding-right: .6rem; padding-left: .6rem; }
     }
+
+    /* Hide some st default menus. "Vider le cache" is hidden: it would clear the cache for everyone. */
+    [data-testid="stMainMenuItem-recordScreencast"] { display: none !important; }
+    [data-testid="stMainMenuItem-clearCache"] { display: none !important; }
+    [data-testid="stMainMenuItem-print"] [data-testid="stMainMenuItemLabel"] { font-size: 0; }
+    [data-testid="stMainMenuItem-print"] [data-testid="stMainMenuItemLabel"]::after { content: "Imprimer"; font-size: .875rem; }
+    [data-testid="stMainMenuItem-rerun"] [data-testid="stMainMenuItemLabel"] { font-size: 0; }
+    [data-testid="stMainMenuItem-rerun"] [data-testid="stMainMenuItemLabel"]::after { content: "Relancer"; font-size: .875rem; }
+    [data-testid="stMainMenuItem-theme-System"], [data-testid="stMainMenuItem-theme-Light"], [data-testid="stMainMenuItem-theme-Dark"] { font-size: 0; }
+    [data-testid="stMainMenuItem-theme-System"]::after { content: "Système"; font-size: .875rem; }
+    [data-testid="stMainMenuItem-theme-Light"]::after { content: "Jour"; font-size: .875rem; }
+    [data-testid="stMainMenuItem-theme-Dark"]::after { content: "Nuit"; font-size: .875rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+# ---- Styles and script of the ranking frame ---------------------------------
+# The frame is a separate document: it cannot see the page CSS, and the page
+# cannot reach into it. Its colours are CSS variables, switched by theme class.
+
+_DARK_DECLARATIONS = (
+    "--ink: #e8edf2; --muted: #a7b7c6; --blue: #72d5bf; --blue-pale: #1c403f; --line: #304a57; "
+    "--paper: #101b24; --surface: #182832; --surface-soft: #1d303a; --shadow: 0 18px 48px rgba(0, 0, 0, .2); "
+    "--thead: #15364a; --thead-line: #315a80; --thead-hover: #1c4660; --thead-ink: #dce9f5; "
+    "--row-hover: #203a42; --chip-bg: #203640; --chip-ink: #d7e5e7; --chip-line: #304a57; "
+    "--cat-vivid-ink: #063c35; --cat-vivid-bg: #8cddbb; --cat-pale-ink: #b9efd0; --cat-pale-bg: #28523e; "
+    "--cat-yellow-ink: #f4dfa1; --cat-yellow-bg: #51451f; --cat-orange-ink: #f7d1a7; --cat-orange-bg: #553b27; "
+    "--cat-red-ink: #fff; --cat-red-bg: #a63e47; --cat-na-ink: #a7b7c6; --cat-na-bg: #354653;"
+)
+_DARK_BLOCK = (
+    f"body.dark {{ {_DARK_DECLARATIONS} }}\n"
+    f"@media (prefers-color-scheme: dark) {{ body:not(.light) {{ {_DARK_DECLARATIONS} }} }}"
+)
+
+_FRAME_CSS_TEMPLATE = """
+@font-face { font-family: 'DM Sans'; font-style: normal; font-weight: 400 700; font-display: swap; src: url('/app/static/fonts/DMSans-Variable.ttf') format('truetype'); }
+@font-face { font-family: 'Fraunces'; font-style: normal; font-weight: 500 600; font-display: swap; src: url('/app/static/fonts/Fraunces-Variable.ttf') format('truetype'); }
+
+:root {
+    --ink: #152a40; --muted: #657a8d; --blue: #087e74; --blue-pale: #e2f4ef; --line: #dce7e8;
+    --paper: #f4f8f7; --surface: #fff; --surface-soft: #f8fbfa;
+    --shadow: 0 18px 48px rgba(20, 48, 67, .075), 0 2px 8px rgba(20, 48, 67, .035);
+    --thead: #15364f; --thead-line: #315a80; --thead-hover: #1a4261; --thead-ink: #dce9f5;
+    --row-hover: #f0f8f5; --chip-bg: #f4f8f7; --chip-ink: #435b68; --chip-line: #e6eeeb;
+    --cat-vivid-ink: #075c4a; --cat-vivid-bg: #aee9ce;
+    --cat-pale-ink: #176747; --cat-pale-bg: #e0f4e8;
+    --cat-yellow-ink: #735500; --cat-yellow-bg: #fff1bf;
+    --cat-orange-ink: #78410f; --cat-orange-bg: #f9d6ae;
+    --cat-red-ink: #fff; --cat-red-bg: #c84d51;
+    --cat-na-ink: #657a8d; --cat-na-bg: #e9eef3;
+}
+__DARK_BLOCK__
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: transparent; color: var(--ink); font-family: 'DM Sans', sans-serif; }
+[hidden] { display: none !important; }
+.app.show-detail .list { display: none; }
+
+/* Table */
+.scroll { width: 100%; overflow: auto; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow); }
+.ranking-table { width: 100%; min-width: 1250px; border-collapse: separate; border-spacing: 0; }
+.ranking-table th { position: sticky; top: 0; z-index: 1; color: var(--thead-ink); background: var(--thead); text-align: center; text-transform: uppercase; font-size: .64rem; font-weight: 700; letter-spacing: .12em; padding: 1rem 1.1rem; border-bottom: 1px solid var(--thead-line); white-space: nowrap; cursor: pointer; user-select: none; transition: background-color .2s ease; }
+.ranking-table th:hover { background: var(--thead-hover); }
+.ranking-table th:first-child { padding-left: 1.2rem; border-top-left-radius: 16px; }
+.ranking-table th:last-child { border-top-right-radius: 16px; }
+.ranking-table th .icon { font-size: .85em; margin-left: 3px; }
+.ranking-table td { padding: 1rem 1.1rem; border-bottom: 1px solid var(--line); font-size: .84rem; line-height: 1.5; vertical-align: middle; color: var(--ink); }
+.ranking-table tr:last-child td { border-bottom: 0; }
+.ranking-table tbody tr { transition: background-color .16s ease; }
+.ranking-table tbody tr:hover { background: var(--row-hover); }
+.ranking-table td.empty { text-align: center; padding: 3rem 1rem; color: var(--muted); font-size: 1rem; border-bottom: none; }
+
+.rank-number { color: #8a9aa8; font-size: .78rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rank-first { color: #087e74; }
+.company-link { color: var(--ink); font-weight: 700; text-decoration: none; text-underline-offset: 4px; cursor: pointer; }
+.company-link:hover { color: var(--blue); text-decoration: underline; }
+.data-chip { display: inline-block; padding: .34rem .58rem; border: 1px solid var(--chip-line); border-radius: 999px; background: var(--chip-bg); color: var(--chip-ink); font-size: .75rem; line-height: 1.45; }
+.discount-value { color: var(--ink); font-size: .83rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.score-pill { display: inline-flex; align-items: center; justify-content: center; padding: .2rem .45rem; font-size: .75rem; font-weight: 700; font-variant-numeric: tabular-nums; border-radius: 6px; line-height: 1; }
+
+.category-green-vivid { color: var(--cat-vivid-ink); background: var(--cat-vivid-bg); }
+.category-green-pale { color: var(--cat-pale-ink); background: var(--cat-pale-bg); }
+.category-yellow { color: var(--cat-yellow-ink); background: var(--cat-yellow-bg); }
+.category-orange { color: var(--cat-orange-ink); background: var(--cat-orange-bg); }
+.category-red { color: var(--cat-red-ink); background: var(--cat-red-bg); }
+.category-unavailable { color: var(--cat-na-ink); background: var(--cat-na-bg); }
+
+/* Mobile sort select (shown only in cards view on narrow screens) */
+.mobile-sort { display: none; align-items: center; gap: .5rem; margin-bottom: .8rem; }
+.mobile-sort label { color: var(--muted); font-size: .8rem; font-weight: 700; }
+#mobile-sort { flex: 1; padding: .35rem .5rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-family: inherit; font-size: .85rem; }
+
+/* Fiche SCPI */
+.back { min-height: 2.75rem; margin: 0 0 1rem; padding: .6rem 1rem; border: 1px solid #c8dcda; border-radius: 10px; background: var(--surface); color: var(--blue); font-family: inherit; font-size: .9rem; font-weight: 650; cursor: pointer; }
+.back:hover { background: var(--blue-pale); }
+.scpi-card { margin: .2rem 0 1rem; padding: clamp(1.2rem, 3vw, 2rem); border: 1px solid var(--line); border-radius: 20px; background: var(--surface); box-shadow: var(--shadow); }
+.card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; padding-bottom: 1.25rem; border-bottom: 1px solid var(--line); }
+.card-name { font-family: 'Fraunces', Georgia, serif; font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.2; color: var(--ink); letter-spacing: -.035em; }
+.card-meta { color: var(--muted); font-size: .82rem; margin-top: .28rem; }
+.category-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .75rem; padding: 1.1rem 0; border-bottom: 1px solid var(--line); }
+.category-item { display: flex; align-items: center; gap: .55rem; min-width: 0; }
+.category-dot { display: inline-flex; align-items: center; justify-content: center; min-width: 3.6rem; height: 2.35rem; flex: 0 0 auto; padding: 0 .35rem; border-radius: 9px; font-size: .68rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.category-label { color: var(--muted); font-size: .7rem; line-height: 1.2; }
+.fact-grid { margin-top: 1.1rem; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .8rem; }
+.fact-cell { padding: 1rem; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
+.fact-label { color: var(--muted); font-size: .66rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.fact-value { margin-top: .25rem; color: var(--ink); font-size: .9rem; font-weight: 600; line-height: 1.45; }
+
+@media (max-width: 760px) {
+    .view-cards .mobile-sort { display: flex; }
+    .view-table .ranking-table th, .view-table .ranking-table td { padding: .75rem .8rem; }
+    .view-table .ranking-table td.cell-scpi { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line); }
+    .view-table .ranking-table th:nth-child(2) { left: 0; z-index: 3; }
+
+    .category-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
+    .fact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+    .fact-cell { padding: .8rem; border-radius: 10px; }
+    .scpi-card { padding: 1.1rem; border-radius: 17px; }
+
+    /* Cards: the same table rows, laid out as flex cards */
+    .view-cards .scroll { max-width: 100%; overflow: visible; border: 0; background: transparent; box-shadow: none; }
+    .view-cards .ranking-table, .view-cards .ranking-table tbody { display: block; width: 100%; min-width: 0; max-width: 100%; }
+    .view-cards .ranking-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+    .view-cards .ranking-table tbody tr { display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .4rem; margin-bottom: .6rem; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 4px 12px rgba(20, 48, 67, .04); }
+    .view-cards .ranking-table td { padding: 0; display: inline-flex; flex-direction: row; align-items: baseline; width: auto; border: none; overflow-wrap: anywhere; }
+    .view-cards .ranking-table td::before { content: attr(data-label) " "; font-size: .65rem; letter-spacing: .02em; margin-right: .15rem; font-weight: 700; text-transform: uppercase; color: var(--muted); }
+    .view-cards .cell-place { order: 1; font-weight: bold; margin-right: .3rem; }
+    .view-cards .cell-place::before { content: "#"; margin-right: .1rem; font-size: .75rem; }
+    .view-cards .cell-scpi { order: 2; margin-right: .5rem; }
+    .view-cards .cell-scpi::before { content: none; }
+    .view-cards .cell-scpi .company-link { font-size: 1.05rem; }
+    .view-cards .cell-score { order: 3; flex: 1 1 auto; margin-bottom: .3rem; }
+    .view-cards .cell-score::before { content: none; }
+    .view-cards .cell-badge { order: 4; font-size: .75rem; background: transparent; padding: 0; border: none; margin-right: .5rem; margin-bottom: .2rem; }
+    .view-cards .cell-np { background: transparent !important; border-color: transparent !important; }
+    .view-cards .data-chip { width: auto; max-width: 100%; padding: 0; background: transparent; border: none; font-size: inherit; color: inherit; font-weight: 600; }
+    .view-cards .discount-value { font-size: inherit; font-weight: 600; }
+}
+
+@media (max-width: 420px) {
+    .category-grid { grid-template-columns: 1fr; }
+    .fact-grid { grid-template-columns: 1fr 1fr; }
+    .view-cards .ranking-table tbody tr { padding-right: .6rem; padding-left: .6rem; }
+}
+"""
+
+FRAME_CSS = _FRAME_CSS_TEMPLATE.replace("__DARK_BLOCK__", _DARK_BLOCK)
+
+FRAME_JS = """
+(function () {
+    var app = document.querySelector('.app');
+    var table = document.getElementById('ranking');
+    var select = document.getElementById('mobile-sort');
+    var headers = table ? Array.prototype.slice.call(table.querySelectorAll('th.sort-btn')) : [];
+
+    function sortRows(column, type, direction) {
+        if (!table) { return; }
+        var tbody = table.tBodies[0];
+        var rows = Array.prototype.slice.call(tbody.rows);
+        rows.sort(function (a, b) {
+            var left = a.cells[column].getAttribute('data-sort');
+            var right = b.cells[column].getAttribute('data-sort');
+            var result = type === 'num'
+                ? parseFloat(left) - parseFloat(right)
+                : left.localeCompare(right, 'fr');
+            return direction === 'asc' ? result : -result;
+        });
+        rows.forEach(function (row) { tbody.appendChild(row); });
+    }
+
+    headers.forEach(function (th, index) {
+        th.addEventListener('click', function () {
+            var direction = th.getAttribute('data-dir') === 'asc' ? 'desc' : 'asc';
+            headers.forEach(function (header) {
+                header.setAttribute('data-dir', 'none');
+                var icon = header.querySelector('.icon');
+                icon.textContent = '↕';
+                icon.style.opacity = '0.3';
+            });
+            th.setAttribute('data-dir', direction);
+            var activeIcon = th.querySelector('.icon');
+            activeIcon.textContent = direction === 'asc' ? '↑' : '↓';
+            activeIcon.style.opacity = '1';
+            sortRows(index, th.getAttribute('data-type'), direction);
+        });
+    });
+
+    if (select) {
+        select.addEventListener('change', function () {
+            var option = select.options[select.selectedIndex];
+            sortRows(parseInt(option.value, 10), option.getAttribute('data-type'), option.getAttribute('data-dir'));
+        });
+    }
+
+    function showDetail(id) {
+        Array.prototype.forEach.call(document.querySelectorAll('.detail'), function (detail) {
+            detail.hidden = detail.getAttribute('data-id') !== id;
+        });
+        app.classList.add('show-detail');
+        window.scrollTo(0, 0);
+    }
+
+    function showList() {
+        Array.prototype.forEach.call(document.querySelectorAll('.detail'), function (detail) {
+            detail.hidden = true;
+        });
+        app.classList.remove('show-detail');
+    }
+
+    document.addEventListener('click', function (event) {
+        var opener = event.target.closest('[data-open]');
+        if (opener) {
+            event.preventDefault();
+            showDetail(opener.getAttribute('data-open'));
+            return;
+        }
+        if (event.target.closest('[data-back]')) {
+            showList();
+        }
+    });
+
+    var initial = app.getAttribute('data-initial');
+    if (initial) {
+        showDetail(initial);
+    }
+})();
+"""
+
+# ---- Constants ----------------------------------------------------------------
+
+logger = logging.getLogger("scpiscreen")
 ACCESS_CODE = os.environ.get("SCPISCREEN_ACCESS_CODE", "")
 AUTH_COOKIE_NAME = "scpiscreen_access"
-AUTH_COOKIE_TTL_SECONDS = 30 * 24 * 60 * 60
+AUTH_COOKIE_TTL_SECONDS = access_control.SESSION_TTL_SECONDS
+BAN_DURATION_HOURS = access_control.BAN_DURATION_SECONDS // 3600
+SEARCH_MAX_LENGTH = 80
+MAX_WARNINGS_DISPLAYED = 8
+MARKDOWN_SPECIAL_CHARACTERS = re.compile(r"([\\`*_\[\]<>|#~])")
 
-if len(ACCESS_CODE) < 16:
-    st.error(
-        "Authentification non configurée : définissez SCPISCREEN_ACCESS_CODE "
-        "(16 caractères minimum) dans l’environnement du serveur."
-    )
-    st.stop()
+PAGE_RANKING = "Classement"
+PAGE_METHOD = "Méthode de classement"
+PAGE_OPTIONS = [PAGE_RANKING, PAGE_METHOD]
+PAGE_QUERY_METHOD = "methode"
 
-def create_access_token() -> str:
-    issued_at = str(int(time.time()))
-    signature = hmac.new(
-        ACCESS_CODE.encode("utf-8"), issued_at.encode("ascii"), hashlib.sha256
-    ).hexdigest()
-    return f"{issued_at}.{signature}"
+MOBILE_VIEW_CARDS = "Cartes"
+MOBILE_VIEW_TABLE = "Tableau"
+MOBILE_VIEW_OPTIONS = [MOBILE_VIEW_CARDS, MOBILE_VIEW_TABLE]
 
-def is_valid_access_token(token: str | None) -> bool:
-    if not token:
-        return False
-    try:
-        issued_at, signature = token.encode("ascii").decode("ascii").split(".", 1)
-        issued_at_seconds = int(issued_at)
-    except (UnicodeEncodeError, ValueError):
-        return False
+# (key, header label, sort type). Column order matches the mobile sort select below.
+TABLE_HEADERS = (
+    ("place", "Place", "num"),
+    ("scpi", "SCPI", "str"),
+    ("score", "Note / 100", "num"),
+    ("discount", "Décote", "num"),
+    ("pga", "PGA", "num"),
+    ("tri", "TRI", "num"),
+    ("sectors", "Secteurs<br>majoritaires", "str"),
+    ("regions", "Régions<br>majoritaires", "str"),
+    ("tri_np", "TRI Max<br>Nue Propriété", "num"),
+    ("duree_np", "Durée TRI Max<br>Nue Propriété", "num"),
+    ("bonus", "Bonus Louve<br>(cashback)", "num"),
+)
+# (label, column index, direction) for the mobile select; the first entry is the default order.
+MOBILE_SORT_CHOICES = (
+    ("Note / 100", 2, "desc"),
+    ("Place", 0, "asc"),
+    ("Décote", 3, "desc"),
+    ("PGA", 4, "desc"),
+    ("TRI", 5, "desc"),
+    ("TRI Max Nue Propriété", 8, "desc"),
+)
 
-    token_age = time.time() - issued_at_seconds
-    if token_age < 0 or token_age > AUTH_COOKIE_TTL_SECONDS:
-        return False
+# Frame heights are estimates: rows are not measured, so a frame may show a little
+# extra space or an inner scrollbar.
+DESKTOP_ROW_PX = 66
+TABLE_HEADER_PX = 64
+MOBILE_CARD_PX = 124
+MOBILE_TABLE_ROW_PX = 62
+DESKTOP_DETAIL_PX = 840
+MOBILE_DETAIL_PX = 1150
 
-    expected_signature = hmac.new(
-        ACCESS_CODE.encode("utf-8"), issued_at.encode("ascii"), hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(signature, expected_signature)
 
-cookie_manager = stx.CookieManager(key="scpiscreen_auth_cookie")
-if not st.session_state.get("access_granted", False):
-    if is_valid_access_token(cookie_manager.get(AUTH_COOKIE_NAME)):
-        st.session_state["access_granted"] = True
+# ---- Helpers ------------------------------------------------------------------
 
-if not st.session_state.get("access_granted", False):
+def current_client_key() -> str | None:
+    """Client IP as seen by Streamlit, or None when it is not available."""
+    address = getattr(st.context, "ip_address", None)
+    if not address:
+        return None
+    text = str(address).strip()
+    return text or None
+
+
+def current_theme() -> str:
+    """Streamlit theme type when exposed by the version in use, otherwise an empty string."""
+    theme_type = getattr(getattr(st.context, "theme", None), "type", None)
+    return theme_type if theme_type in ("light", "dark") else ""
+
+
+def md_text(value: str) -> str:
+    """Escape text coming from the sheet before showing it as Markdown."""
+    return MARKDOWN_SPECIAL_CHARACTERS.sub(r"\\\1", html.escape(str(value), quote=False))
+
+
+def render_gate_header() -> None:
     st.markdown(
         "<header class='masthead'><div class='brand-line'><span class='brand-mark'>S</span> SCPIScreen</div>"
         "<div class='masthead-body'><div><div class='masthead-kicker'>Accès privé</div>"
@@ -416,39 +522,12 @@ if not st.session_state.get("access_granted", False):
         "<div class='masthead-lede'>Saisissez votre code d’accès pour continuer.</div></div></div></header>",
         unsafe_allow_html=True,
     )
-    with st.form("access_gate"):
-        access_code = st.text_input("Code d’accès", type="password")
-        access_submitted = st.form_submit_button("Accéder au classement", type="primary", use_container_width=True)
-    if access_submitted:
-        if hmac.compare_digest(access_code.encode("utf-8"), ACCESS_CODE.encode("utf-8")):
-            st.session_state["access_granted"] = True
-            cookie_manager.set(
-                AUTH_COOKIE_NAME,
-                create_access_token(),
-                key="save_scpiscreen_access",
-                max_age=AUTH_COOKIE_TTL_SECONDS,
-                secure=True,
-                same_site="strict",
-            )
-        else:
-            st.error("Code d’accès incorrect.")
-    if not st.session_state.get("access_granted", False):
-        st.stop()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def cached_sheet_data(sheet_id: str) -> dict[str, list[dict[str, str]]]:
-    return load_google_sheet(sheet_id, WORKSHEETS)
+def render_ban_notice(until: float) -> None:
+    until_text = datetime.fromtimestamp(until).strftime("%d/%m/%Y à %H:%M")
+    st.error(f"Accès temporairement bloqué depuis cette adresse jusqu’au {until_text}.")
 
-@st.cache_data(ttl=900, show_spinner=False)
-def cached_weights_data(sheet_id: str) -> list[list[str]]:
-    return load_weights_sheet(sheet_id)
-
-if st.query_params.get("refresh") == "1":
-    cached_sheet_data.clear()
-    cached_weights_data.clear()
-    del st.query_params["refresh"]
-    st.rerun()
 
 def display_percent(value: str) -> str:
     value = str(value).strip()
@@ -456,6 +535,7 @@ def display_percent(value: str) -> str:
         return "—"
     value = value.replace("%", "").strip()
     return f"{value}%" if value else "—"
+
 
 def safe_float(val):
     try:
@@ -465,6 +545,17 @@ def safe_float(val):
         return float(s) if s else -9999.0
     except ValueError:
         return -9999.0
+
+
+def category_class(score: float) -> str:
+    return (
+        "category-green-vivid" if score >= 70 else
+        "category-green-pale" if score >= 60 else
+        "category-yellow" if score >= 50 else
+        "category-orange" if score >= 40 else
+        "category-red"
+    )
+
 
 def fact_fields(item: dict[str, Any]) -> list[tuple[str, str]]:
     percent_fields = {
@@ -516,33 +607,305 @@ def fact_fields(item: dict[str, Any]) -> list[tuple[str, str]]:
     return [(label, format_value(label, value)) for label, value in rows]
 
 
+# ---- Ranking frame builders ---------------------------------------------------
+
+def cell_badge(label: str, text: str, sort_value: float, extra_class: str = "") -> str:
+    return (
+        f"<td class='cell-badge{extra_class}' data-label='{label}' data-sort='{sort_value}'>"
+        f"<span class='discount-value'>{html.escape(text)}</span></td>"
+    )
+
+
+def chip_cell(label: str, text: str, sort_text: str) -> str:
+    return (
+        f"<td class='cell-badge' data-label='{label}' data-sort='{html.escape(sort_text.lower(), quote=True)}'>"
+        f"<span class='data-chip'>{html.escape(text)}</span></td>"
+    )
+
+
+def render_row(item: dict[str, Any], profile: str) -> str:
+    rank = item["original_rank"]
+    name = str(item.get("name", "SCPI"))
+    scpi_id = html.escape(str(item.get("scpi_id", "")), quote=True)
+    score = item["profile_scores"].get(profile, 0)
+    duree = str(item.get("duree_tri_demembrement", "")).strip()
+    if duree and not duree.lower().endswith("ans"):
+        duree = f"{duree} ans"
+    rank_class = " rank-first" if rank == 1 else ""
+    cells = [
+        f"<td class='rank-number{rank_class} cell-place' data-label='Place' data-sort='{rank}'>{rank:02}</td>",
+        f"<td class='cell-scpi' data-label='SCPI' data-sort='{html.escape(name.lower(), quote=True)}'>"
+        f"<a class='company-link' href='#' data-open='{scpi_id}'>{html.escape(name)}</a></td>",
+        f"<td class='cell-score' data-label='Note / 100' data-sort='{score}'>"
+        f"<span class='score-pill {category_class(score)}'>{score:.1f}</span></td>",
+        cell_badge("Décote", display_percent(item.get("discount", "")), safe_float(item.get("discount"))),
+        cell_badge("PGA", display_percent(item.get("pga", "")), safe_float(item.get("pga"))),
+        cell_badge("TRI", display_percent(item.get("tri", "")), safe_float(item.get("tri"))),
+        chip_cell("Secteurs majoritaires", item.get("main_sectors", "—"), item.get("main_sectors", "")),
+        chip_cell("Régions majoritaires", item.get("main_regions", "—"), item.get("main_regions", "")),
+        cell_badge(
+            "TRI Max Nue Propriété",
+            display_percent(item.get("tri_demembrement", "")),
+            safe_float(item.get("tri_demembrement")),
+            " cell-np",
+        ),
+        cell_badge(
+            "Durée TRI Max Nue Propriété",
+            duree or "—",
+            safe_float(item.get("duree_tri_demembrement")),
+            " cell-np",
+        ),
+        cell_badge("Bonus Louve (cashback)", display_percent(item.get("bonus_louve", "")), safe_float(item.get("bonus_louve"))),
+    ]
+    return "<tr>" + "".join(cells) + "</tr>"
+
+
+def render_detail(item: dict[str, Any], profile: str) -> str:
+    rank = item["original_rank"]
+    scpi_id = html.escape(str(item.get("scpi_id", "")), quote=True)
+    name = html.escape(str(item.get("name", "SCPI")))
+    category_markup = []
+    for category in CATEGORY_ORDER:
+        score = item["category_scores"].get(category)
+        if score is None:
+            score_text, score_class = "—/100", "category-unavailable"
+        else:
+            score_text, score_class = f"{score:.0f}/100", category_class(score)
+        category_markup.append(
+            f"<div class='category-item'><span class='category-dot {score_class}'>{score_text}</span>"
+            f"<span class='category-label'>{html.escape(category)}</span></div>"
+        )
+    fact_rows = fact_fields(item)
+    fact_cells = "".join(
+        f"<div class='fact-cell'><div class='fact-label'>{html.escape(label)}</div>"
+        f"<div class='fact-value'>{html.escape(value)}</div></div>"
+        for label, value in fact_rows
+    )
+    if not fact_rows:
+        fact_cells = "<div class='fact-cell'><div class='fact-label'>Données</div><div class='fact-value'>À renseigner dans le Google Sheet</div></div>"
+    return (
+        f"<section class='detail' data-id='{scpi_id}' hidden>"
+        "<button type='button' class='back' data-back>← Retour au classement</button>"
+        "<article class='scpi-card'>"
+        f"<div class='card-top'><div><div class='card-name'>{name}</div>"
+        f"<div class='card-meta'>{rank}e place · Profil {html.escape(profile)}</div></div></div>"
+        f"<div class='category-grid'>{''.join(category_markup)}</div>"
+        f"<div class='fact-grid'>{fact_cells}</div>"
+        "</article></section>"
+    )
+
+
+def build_mobile_select() -> str:
+    options = "".join(
+        f"<option value='{column}' data-dir='{direction}' data-type='num'>{html.escape(label)}</option>"
+        for label, column, direction in MOBILE_SORT_CHOICES
+    )
+    return f"<div class='mobile-sort'><label for='mobile-sort'>Trier par :</label><select id='mobile-sort'>{options}</select></div>"
+
+
+def build_ranking_document(
+    rows_items: list[dict[str, Any]],
+    detail_items: list[dict[str, Any]],
+    profile: str,
+    *,
+    mobile: bool,
+    view: str,
+    theme: str,
+    initial_detail_id: str | None,
+) -> str:
+    view_class = "view-cards" if mobile and view == MOBILE_VIEW_CARDS else "view-table"
+    header_cells = "".join(
+        f"<th class='sort-btn' data-type='{sort_type}' data-dir='none'>{label} "
+        "<span class='icon' style='opacity: 0.3;'>↕</span></th>"
+        for _, label, sort_type in TABLE_HEADERS
+    )
+    body_rows = [render_row(item, profile) for item in rows_items]
+    if not body_rows:
+        body_rows = ["<tr><td colspan='11' class='empty'>Aucune SCPI ne correspond à votre recherche.</td></tr>"]
+    details = "".join(render_detail(item, profile) for item in detail_items)
+    initial = html.escape(initial_detail_id or "", quote=True)
+    detail_class = " show-detail" if initial_detail_id else ""
+    select_html = build_mobile_select() if mobile else ""
+    return (
+        "<!DOCTYPE html><html lang='fr'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        f"<style>{FRAME_CSS}</style></head>"
+        f"<body class='{theme}'>"
+        f"<div class='app {view_class}{detail_class}' data-initial='{initial}'>"
+        "<div class='list'>"
+        f"{select_html}"
+        "<div class='scroll'><table class='ranking-table' id='ranking'>"
+        f"<thead><tr>{header_cells}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table></div></div>"
+        f"{details}</div>"
+        f"<script>{FRAME_JS}</script>"
+        "</body></html>"
+    )
+
+
+def frame_height(row_count: int, *, mobile: bool, view: str) -> int:
+    rows = max(1, row_count)
+    if not mobile:
+        return max(TABLE_HEADER_PX + rows * DESKTOP_ROW_PX, DESKTOP_DETAIL_PX)
+    if view == MOBILE_VIEW_CARDS:
+        return max(rows * MOBILE_CARD_PX + 40, MOBILE_DETAIL_PX)
+    return max(TABLE_HEADER_PX + rows * MOBILE_TABLE_ROW_PX, MOBILE_DETAIL_PX)
+
+
+def render_ranking_frame(
+    rows_items: list[dict[str, Any]],
+    detail_items: list[dict[str, Any]],
+    profile: str,
+    *,
+    mobile: bool,
+    view: str,
+    theme: str,
+    initial_detail_id: str | None,
+) -> None:
+    document = build_ranking_document(
+        rows_items,
+        detail_items,
+        profile,
+        mobile=mobile,
+        view=view,
+        theme=theme,
+        initial_detail_id=initial_detail_id,
+    )
+    components.html(
+        document,
+        height=frame_height(len(rows_items), mobile=mobile, view=view),
+        scrolling=True,
+    )
+
+
+# ---- Access gate --------------------------------------------------------------
+
+if len(ACCESS_CODE) < access_control.ACCESS_CODE_MIN_LENGTH:
+    st.error(
+        "Authentification non configurée : définissez SCPISCREEN_ACCESS_CODE "
+        f"({access_control.ACCESS_CODE_MIN_LENGTH} caractères minimum) dans l’environnement du serveur."
+    )
+    st.stop()
+
+access_control.configure_audit_log(ACCESS_CODE.encode("utf-8"))
+client_key = current_client_key()  # None when Streamlit does not expose the address
+cookie_manager = stx.CookieManager(key="scpiscreen_auth_cookie")
+
+
+def fallback_ban_until() -> float | None:
+    """Per-browser-session ban, used only when the client address is unavailable."""
+    until = st.session_state.get("fallback_banned_until")
+    if isinstance(until, (int, float)) and until > time.time():
+        return float(until)
+    return None
+
+
+try:
+    if client_key is not None:
+        banned_until = access_control.ban_until(client_key)
+    else:
+        banned_until = fallback_ban_until()
+    if banned_until is None and not st.session_state.get("access_granted", False):
+        if access_control.is_valid_session(cookie_manager.get(AUTH_COOKIE_NAME)):
+            st.session_state["access_granted"] = True
+except access_control.AccessStateError:
+    logger.exception("Access state file unreadable")
+    render_gate_header()
+    st.error("Le contrôle d’accès est temporairement indisponible. Contactez l’administrateur.")
+    st.stop()
+
+if banned_until is not None:
+    access_control.log_event("ban_refused", client_key)
+    render_gate_header()
+    render_ban_notice(banned_until)
+    st.stop()
+
+if not st.session_state.get("access_granted", False):
+    render_gate_header()
+    with st.form("access_gate"):
+        access_code = st.text_input("Code d’accès", type="password")
+        access_submitted = st.form_submit_button("Accéder au classement", type="primary", use_container_width=True)
+    if access_submitted:
+        try:
+            if access_control.access_code_matches(access_code, ACCESS_CODE):
+                session_token = access_control.create_session()
+                if client_key is not None:
+                    access_control.clear_failures(client_key)
+                st.session_state.pop("fallback_failures", None)
+                st.session_state.pop("fallback_banned_until", None)
+                st.session_state["access_granted"] = True
+                access_control.log_event("login_success", client_key)
+                cookie_manager.set(
+                    AUTH_COOKIE_NAME,
+                    session_token,
+                    key="save_scpiscreen_access",
+                    max_age=AUTH_COOKIE_TTL_SECONDS,
+                    secure=True,
+                    same_site="strict",
+                )
+            else:
+                if client_key is not None:
+                    remaining = access_control.record_failure(client_key)
+                else:
+                    failures = int(st.session_state.get("fallback_failures", 0)) + 1
+                    st.session_state["fallback_failures"] = failures
+                    remaining = max(0, access_control.MAX_FAILED_ATTEMPTS - failures)
+                    if remaining == 0:
+                        st.session_state["fallback_banned_until"] = time.time() + access_control.BAN_DURATION_SECONDS
+                access_control.log_event("login_failed", client_key, remaining=remaining)
+                if remaining == 0:
+                    access_control.log_event("ban_created", client_key, hours=BAN_DURATION_HOURS)
+                    st.error(f"Trop de tentatives. Accès bloqué pendant {BAN_DURATION_HOURS} heures.")
+                else:
+                    st.error(f"Code d’accès incorrect. Il vous reste {remaining} tentative(s).")
+        except access_control.AccessStateError:
+            logger.exception("Access state file unreadable during login")
+            st.error("Le contrôle d’accès est temporairement indisponible. Contactez l’administrateur.")
+    if not st.session_state.get("access_granted", False):
+        st.stop()
+
+
+# ---- Data loading -----------------------------------------------------------
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_sheet_data(sheet_id: str) -> dict[str, list[dict[str, str]]]:
+    return load_google_sheet(sheet_id, WORKSHEETS)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_weights_data(sheet_id: str) -> list[list[str]]:
+    return load_weights_sheet(sheet_id)
+
+
 load_error = ""
 try:
     data = cached_sheet_data(SHEET_ID)
 except SheetLoadError as error:
     data = {"data": [], "scores": []}
     load_error = str(error)
+except Exception:
+    logger.exception("Unexpected error while loading the Google Sheet")
+    data = {"data": [], "scores": []}
+    load_error = "Erreur interne lors du chargement des données."
 
 masthead_status = "Source connectée"
-refresh_params = dict(st.query_params)
-refresh_params["refresh"] = "1"
-refresh_url = "?" + urlencode(refresh_params)
 st.markdown(
-        f"""
-        <header class="masthead">
-            <div class="brand-line"><span class="brand-mark">S</span><span>SCPIScreen</span>
-                <span class="brand-divider"></span></div>
-            <div class="masthead-body"><div>
-                <div class="masthead-title">Classement des SCPI</div>
-                <div class="masthead-lede">Selon plusieurs profils d’investissement</div>
-            </div><div class="masthead-tools">
-                <a class="refresh-action" href="{html.escape(refresh_url, quote=True)}" title="Télécharger à nouveau les données du Google Sheet">Actualiser</a>
-                <span class="source-badge">{masthead_status}</span>
-            </div></div>
-        </header>
-        """,
-        unsafe_allow_html=True,
+    f"""
+    <header class="masthead">
+        <div class="brand-line"><span class="brand-mark">S</span><span>SCPIScreen</span>
+            <span class="brand-divider"></span></div>
+        <div class="masthead-body"><div>
+            <div class="masthead-title">Classement des SCPI</div>
+            <div class="masthead-lede">Selon plusieurs profils d’investissement</div>
+        </div><div class="masthead-tools">
+            <span class="source-badge">{masthead_status}</span>
+        </div></div>
+    </header>
+    """,
+    unsafe_allow_html=True,
 )
+
 
 def render_footer() -> None:
     """Render the license and liability notice."""
@@ -562,19 +925,13 @@ def render_method_page() -> None:
     try:
         matrix = build_weight_matrix(cached_weights_data(SHEET_ID))
     except SheetLoadError as error:
-        st.error(f"Les pondérations du Google Sheet ne sont pas accessibles : {error}")
+        st.error(md_text(f"Les pondérations du Google Sheet ne sont pas accessibles : {error}"))
+        return
+    except Exception:
+        logger.exception("Unexpected error while building the weights matrix")
+        st.error("Les pondérations ne peuvent pas être affichées.")
         return
     st.markdown(build_method_page_html(matrix), unsafe_allow_html=True)
-
-
-PAGE_RANKING = "Classement"
-PAGE_METHOD = "Méthode de classement"
-PAGE_OPTIONS = [PAGE_RANKING, PAGE_METHOD]
-PAGE_QUERY_METHOD = "methode"
-
-MOBILE_VIEW_CARDS = "Cartes"
-MOBILE_VIEW_TABLE = "Tableau"
-MOBILE_VIEW_OPTIONS = [MOBILE_VIEW_CARDS, MOBILE_VIEW_TABLE]
 
 
 def handle_page_change() -> None:
@@ -616,327 +973,128 @@ if requested_page == PAGE_METHOD:
 
 profile_column, empty_column = st.columns([1.7, 0.3])
 with profile_column:
-        st.markdown('<div class="profile-label">Profil d’investissement</div>', unsafe_allow_html=True)
-        profile = st.segmented_control(
-                "Profil d’investissement",
-                PROFILE_ORDER,
-                default=PROFILE_ORDER[0],
-                label_visibility="collapsed",
-                key="profile_selector",
-                width="stretch",
-        )
-
-# Default ranking (Profile score) on Python side
-rankings = build_rankings(data)
-rankings.sort(key=lambda item: item["profile_scores"].get(profile or PROFILE_ORDER[0], 0), reverse=True)
+    st.markdown('<div class="profile-label">Profil d’investissement</div>', unsafe_allow_html=True)
+    profile = st.segmented_control(
+        "Profil d’investissement",
+        PROFILE_ORDER,
+        default=PROFILE_ORDER[0],
+        label_visibility="collapsed",
+        key="profile_selector",
+        width="stretch",
+    )
 profile = profile or PROFILE_ORDER[0]
+
+try:
+    rankings = build_rankings(data)
+except Exception:
+    logger.exception("Unexpected error while building the rankings")
+    rankings = []
+    load_error = load_error or "Erreur interne lors de la préparation des données."
+
+# Default ranking (profile score) on Python side
+rankings.sort(key=lambda item: item["profile_scores"].get(profile, 0), reverse=True)
 
 # Store original rank
 for i, item in enumerate(rankings, start=1):
     item["original_rank"] = i
 
-fact_rows_by_scpi = [fact_fields(item) for item in rankings]
+data_warnings = [] if load_error else validate_scores(data)
 
 if load_error:
-    st.error(f"Les données du Google Sheet ne sont pas accessibles : {html.escape(load_error)}")
+    st.error(f"Les données du Google Sheet ne sont pas accessibles : {md_text(load_error)}")
+for message in data_warnings[:MAX_WARNINGS_DISPLAYED]:
+    st.warning(md_text(message))
+if len(data_warnings) > MAX_WARNINGS_DISPLAYED:
+    remaining_warnings = len(data_warnings) - MAX_WARNINGS_DISPLAYED
+    st.warning(md_text(f"{remaining_warnings} autre(s) avertissement(s) dans le Google Sheet."))
 
-selected_scpi_id = st.query_params.get("scpi")
-selected_scpi = next(
-    (item for item in rankings if item["scpi_id"] == selected_scpi_id),
-    None,
-)
-
-if selected_scpi is None and selected_scpi_id:
+# Deep link to a SCPI sheet: applied on the first render of a session only, so later
+# reruns (search, profile, view) keep the table, while the URL stays shareable.
+requested_scpi = str(st.query_params.get("scpi", "") or "")
+known_ids = {item["scpi_id"] for item in rankings}
+initial_detail_id: str | None = None
+if requested_scpi and requested_scpi not in known_ids:
     st.error("Cette fiche SCPI est introuvable dans la source de données.")
-    if st.button("Retour au classement", icon=":material/arrow_back:"):
-        st.query_params.clear()
-        st.rerun()
-elif selected_scpi is not None:
-    selected_rank = selected_scpi["original_rank"]
-    if st.button("Retour au classement", icon=":material/arrow_back:"):
-        st.query_params.clear()
-        st.rerun()
+elif requested_scpi and "deep_link_consumed" not in st.session_state:
+    initial_detail_id = requested_scpi
+st.session_state["deep_link_consumed"] = True
 
-    item = selected_scpi
-    category_markup = []
-    for category in CATEGORY_ORDER:
-        score = item["category_scores"].get(category)
-        if score is None:
-            score_text, score_class = "—/100", "category-unavailable"
-        else:
-            score_text = f"{score:.0f}/100"
-            score_class = (
-                "category-green-vivid" if score >= 70 else
-                "category-green-pale" if score >= 60 else
-                "category-yellow" if score >= 50 else
-                "category-orange" if score >= 40 else
-                "category-red"
+with st.container(key="mobile_view_toolbar"):
+    st.markdown('<div class="profile-label">Affichage</div>', unsafe_allow_html=True)
+    mobile_view = st.segmented_control(
+        "Affichage",
+        MOBILE_VIEW_OPTIONS,
+        default=MOBILE_VIEW_CARDS,
+        key="mobile_view_selector",
+        label_visibility="collapsed",
+        width="stretch",
+    )
+mobile_view = mobile_view or MOBILE_VIEW_CARDS
+
+col_heading, col_search = st.columns([1.5, 1])
+with col_heading:
+    st.markdown(
+        f"<div class='section-heading' style='margin-top: 0.5rem; margin-bottom: 0.5rem;'><div><div class='section-kicker'>{html.escape(profile)}</div>"
+        "<div class='section-title'>Classement complet</div></div></div>",
+        unsafe_allow_html=True,
+    )
+with col_search:
+    # Changing the widget key resets the field, which is how the clear button empties it.
+    search_reset_count = st.session_state.setdefault("search_reset_count", 0)
+    search_key = f"scpi_search_{search_reset_count}"
+    with st.container(key="search_box"):
+        if HAS_KEYUP:
+            keyup_options: dict[str, Any] = {}
+            if "value" in inspect.signature(st_keyup).parameters:
+                keyup_options["value"] = ""
+            search_query = st_keyup(
+                "Recherche",
+                placeholder="🔍 Rechercher une SCPI...",
+                label_visibility="collapsed",
+                debounce=250,
+                key=search_key,
+                **keyup_options,
             )
-        category_markup.append(
-            f"<div class='category-item'><span class='category-dot {score_class}'>{score_text}</span>"
-            f"<span class='category-label'>{html.escape(category)}</span></div>"
-        )
+        else:
+            search_query = st.text_input(
+                "Recherche",
+                placeholder="🔍 Rechercher une SCPI... (Appuyez sur Entrée)",
+                label_visibility="collapsed",
+                key=search_key,
+                max_chars=SEARCH_MAX_LENGTH,
+            )
+        # Overlaid on the right of the field by CSS; only shown when there is text to clear.
+        if search_query and st.button("✕", key="search_clear", help="Effacer la recherche"):
+            st.session_state["search_reset_count"] = search_reset_count + 1
+            st.rerun()
 
-    fact_rows = fact_fields(item)
-    fact_cells = "".join(
-        f"<div class='fact-cell'><div class='fact-label'>{html.escape(label)}</div><div class='fact-value'>{html.escape(value)}</div></div>"
-        for label, value in fact_rows
+search_text = str(search_query or "").strip()[:SEARCH_MAX_LENGTH]
+search_lower = search_text.lower()
+visible_items = [
+    item for item in rankings
+    if not search_lower or search_lower in item.get("name", "").lower()
+]
+
+theme = current_theme()
+with st.container(key="ranking_desktop"):
+    render_ranking_frame(
+        visible_items,
+        rankings,
+        profile,
+        mobile=False,
+        view=MOBILE_VIEW_TABLE,
+        theme=theme,
+        initial_detail_id=initial_detail_id,
     )
-
-    if not fact_rows:
-        fact_cells = "<div class='fact-cell'><div class='fact-label'>Données</div><div class='fact-value'>À renseigner dans le Google Sheet</div></div>"
-
-    st.markdown(
-        f"""
-        <article class="scpi-card">
-          <div class="card-top">
-            <div><div class="card-name">{html.escape(item.get('name', 'SCPI'))}</div>
-                            <div class="card-meta">{selected_rank}e place · Profil {html.escape(profile)}</div>
-            </div>
-          </div>
-                    <div class="category-grid">{''.join(category_markup)}</div>
-          <div class="fact-grid">{fact_cells}</div>
-        </article>
-        """,
-        unsafe_allow_html=True,
-    )
-else:
-    # Ranking table
-    col_heading, col_search = st.columns([1.5, 1])
-    with col_heading:
-        st.markdown(
-            f"<div class='section-heading' style='margin-top: 0.5rem; margin-bottom: 0.5rem;'><div><div class='section-kicker'>{html.escape(profile)}</div>"
-            "<div class='section-title'>Classement complet</div></div></div>",
-            unsafe_allow_html=True,
-        )
-    with col_search:
-        # Changing the widget key resets the field, which is how the clear button empties it.
-        search_reset_count = st.session_state.setdefault("search_reset_count", 0)
-        search_key = f"scpi_search_{search_reset_count}"
-        with st.container(key="search_box"):
-            if HAS_KEYUP:
-                search_query = st_keyup(
-                    "Recherche",
-                    placeholder="🔍 Rechercher une SCPI...",
-                    label_visibility="collapsed",
-                    debounce=250,
-                    key=search_key,
-                )
-            else:
-                search_query = st.text_input(
-                    "Recherche",
-                    placeholder="🔍 Rechercher une SCPI... (Appuyez sur Entrée)",
-                    label_visibility="collapsed",
-                    key=search_key,
-                )
-            # Overlaid on the right of the field by CSS; only shown when there is text to clear.
-            if search_query and st.button("✕", key="search_clear", help="Effacer la recherche"):
-                st.session_state["search_reset_count"] = search_reset_count + 1
-                st.rerun()
-    
-    # Mobile only (hidden by CSS on desktop): choose between cards and a scrollable table
-    with st.container(key="mobile_view_toolbar"):
-        st.markdown('<div class="profile-label">Affichage</div>', unsafe_allow_html=True)
-        mobile_view = st.segmented_control(
-            "Affichage",
-            MOBILE_VIEW_OPTIONS,
-            default=MOBILE_VIEW_CARDS,
-            key="mobile_view_selector",
-            label_visibility="collapsed",
-            width="stretch",
-        )
-    is_table_view = mobile_view == MOBILE_VIEW_TABLE
-    view_class = "view-table" if is_table_view else "view-cards"
-    sort_hidden_class = " is-hidden" if is_table_view else ""
-
-    # Generate headers compatible with JS sorting
-    def build_th(label, sort_type="num"):
-        return f"<th class='sort-btn' data-type='{sort_type}' data-dir='none'>{label} <span class='icon' style='opacity: 0.3; font-size: 0.85em; margin-left: 3px;'>↕</span></th>"
-
-    th_html = "".join([
-        build_th("Place", "num"),
-        build_th("SCPI", "str"),
-        build_th("Note / 100", "num"),
-        build_th("Décote", "num"),
-        build_th("PGA", "num"),
-        build_th("TRI", "num"),
-        build_th("Secteurs<br>majoritaires", "str"),
-        build_th("Régions<br>majoritaires", "str"),
-        build_th("TRI Max<br>Nue Propriété", "num"),
-        build_th("Durée TRI Max<br>Nue Propriété", "num"),
-        build_th("Bonus Louve<br>(cashback)", "num")
-    ])
-    
-    # Mobile Sort View Injector
-    st.markdown(
-        f"""
-        <div class='mobile-sort-container{sort_hidden_class}'>
-            <label for='mobile-sort-select'>Trier par :</label>
-            <select id='mobile-sort-select'>
-                <option value='0' data-dir='asc' data-type='num'>Place</option>
-                <option value='3' data-dir='desc' data-type='num'>Décote</option>
-                <option value='4' data-dir='desc' data-type='num'>PGA</option>
-                <option value='5' data-dir='desc' data-type='num'>TRI</option>
-                <option value='8' data-dir='desc' data-type='num'>TRI Max Nue Propriété</option>
-            </select>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    
-    table_rows = []
-    search_q = search_query.strip().lower() if search_query else ""
-    
-    for item in rankings:
-        scpi_name = html.escape(item.get("name", "SCPI"))
-        
-        if search_q and search_q not in scpi_name.lower():
-            continue
-            
-        score = item["profile_scores"].get(profile, 0)
-        score_class = (
-            "category-green-vivid" if score >= 70 else
-            "category-green-pale" if score >= 60 else
-            "category-yellow" if score >= 50 else
-            "category-orange" if score >= 40 else
-            "category-red"
-        )
-        scpi_id = quote(str(item.get("scpi_id", "")), safe="")
-        discount_value = item.get("discount", "").strip()
-        discount = html.escape(display_percent(discount_value))
-        pga = html.escape(display_percent(item.get("pga", "")))
-        tri = html.escape(display_percent(item.get("tri", "")))
-        
-        tri_nue_propriete = html.escape(display_percent(item.get("tri_demembrement", "")))
-        duree_nue_propriete = str(item.get("duree_tri_demembrement", "")).strip()
-        if duree_nue_propriete and not duree_nue_propriete.lower().endswith("ans"):
-            duree_nue_propriete = f"{duree_nue_propriete} ans"
-            
-        bonus_louve = html.escape(display_percent(item.get("bonus_louve", "")))
-        actual_rank = item["original_rank"]
-
-        # Each cell contains a data-sort attribute used by the Javascript script
-        row_cells = [
-            f"<td class='rank-number {'rank-first' if actual_rank == 1 else ''} cell-place' data-label='Place' data-sort='{actual_rank}'>{actual_rank:02}</td>",
-            f"<td class='cell-scpi' data-label='SCPI' data-sort='{scpi_name.lower()}'><a class='company-link' href='?scpi={scpi_id}' target='_self'>{scpi_name}</a></td>",
-            f"<td class='cell-score' data-label='Note / 100' data-sort='{score}'><span class='score-pill {score_class}'>{score:.1f}</span></td>",
-            f"<td class='cell-badge' data-label='Décote' data-sort='{safe_float(item.get('discount'))}'><span class='discount-value'>{discount}</span></td>",
-            f"<td class='cell-badge' data-label='PGA' data-sort='{safe_float(item.get('pga'))}'><span class='discount-value'>{pga}</span></td>",
-            f"<td class='cell-badge' data-label='TRI' data-sort='{safe_float(item.get('tri'))}'><span class='discount-value'>{tri}</span></td>",
-            f"<td class='cell-badge' data-label='Secteurs majoritaires' data-sort='{html.escape(item.get('main_sectors', '')).lower()}'><span class='data-chip'>{html.escape(item.get('main_sectors', '—'))}</span></td>",
-            f"<td class='cell-badge' data-label='Régions majoritaires' data-sort='{html.escape(item.get('main_regions', '')).lower()}'><span class='data-chip'>{html.escape(item.get('main_regions', '—'))}</span></td>",
-            f"<td class='cell-badge cell-np' data-label='TRI Max Nue Propriété' data-sort='{safe_float(item.get('tri_demembrement'))}'><span class='discount-value'>{tri_nue_propriete}</span></td>",
-            f"<td class='cell-badge cell-np' data-label='Durée TRI Max Nue Propriété' data-sort='{safe_float(item.get('duree_tri_demembrement'))}'><span class='discount-value'>{html.escape(duree_nue_propriete or '—')}</span></td>",
-            f"<td class='cell-badge' data-label='Bonus Louve (cashback)' data-sort='{safe_float(item.get('bonus_louve'))}'><span class='discount-value'>{bonus_louve}</span></td>"
-        ]
-        table_rows.append("<tr>" + "".join(row_cells) + "</tr>")
-    
-    if not table_rows:
-        table_rows.append(
-            "<tr><td colspan='11' style='text-align: center; padding: 3rem 1rem; color: var(--muted); font-size: 1rem; border-bottom: none;'>"
-            "Aucune SCPI ne correspond à votre recherche.</td></tr>"
-        )
-        
-    st.markdown(
-        f"""
-        <div class='ranking-scroll {view_class}'>
-            <table class='ranking-table'>
-                <thead><tr>{th_html}</tr></thead>
-                <tbody>{"".join(table_rows)}</tbody>
-            </table>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    
-    components.html(
-        """
-        <script>
-        function initSort() {
-            var parentDoc = window.parent.document;
-            var table = parentDoc.querySelector('.ranking-table');
-            var mobileSort = parentDoc.getElementById('mobile-sort-select');
-            
-            if (table && !table.dataset.sortinit) {
-                table.dataset.sortinit = '1';
-                var ths = table.querySelectorAll('th.sort-btn');
-                
-                ths.forEach(function(th, i) {
-                    th.addEventListener('click', function() {
-                        var tbody = table.querySelector('tbody');
-                        var rows = Array.from(tbody.querySelectorAll('tr'));
-                        var isAsc = th.dataset.dir === 'asc';
-                        var newDir = isAsc ? 'desc' : 'asc';
-                        
-                        // Reset arrows
-                        ths.forEach(function(h) {
-                            h.dataset.dir = 'none';
-                            h.querySelector('.icon').innerHTML = '↕';
-                            h.querySelector('.icon').style.opacity = '0.3';
-                        });
-                        
-                        // Update clicked arrow
-                        th.dataset.dir = newDir;
-                        th.querySelector('.icon').innerHTML = newDir === 'asc' ? '↑' : '↓';
-                        th.querySelector('.icon').style.opacity = '1';
-                        
-                        // Sort rows
-                        rows.sort(function(a, b) {
-                            var vA = a.children[i].dataset.sort;
-                            var vB = b.children[i].dataset.sort;
-                            if (th.dataset.type === 'num') {
-                                return newDir === 'asc' ? parseFloat(vA) - parseFloat(vB) : parseFloat(vB) - parseFloat(vA);
-                            } else {
-                                return newDir === 'asc' ? vA.localeCompare(vB) : vB.localeCompare(vA);
-                            }
-                        });
-                        
-                        // Re-inject sorted rows
-                        rows.forEach(function(r) { tbody.appendChild(r); });
-                    });
-                });
-                
-                // Initialize Mobile Sorting
-                if (mobileSort) {
-                    mobileSort.addEventListener('change', function(e) {
-                        var tbody = table.querySelector('tbody');
-                        var rows = Array.from(tbody.querySelectorAll('tr'));
-                        var i = parseInt(e.target.value);
-                        var option = e.target.options[e.target.selectedIndex];
-                        var newDir = option.dataset.dir;
-                        var type = option.dataset.type;
-                        
-                        rows.sort(function(a, b) {
-                            var vA = a.children[i].dataset.sort;
-                            var vB = b.children[i].dataset.sort;
-                            if (type === 'num') {
-                                return newDir === 'asc' ? parseFloat(vA) - parseFloat(vB) : parseFloat(vB) - parseFloat(vA);
-                            } else {
-                                return newDir === 'asc' ? vA.localeCompare(vB) : vB.localeCompare(vA);
-                            }
-                        });
-                        
-                        rows.forEach(function(r) { tbody.appendChild(r); });
-                    });
-                }
-                
-                return true;
-            }
-            return false;
-        }
-        
-        // Execute the function until the table is rendered in the DOM
-        var attempts = 0;
-        var interval = setInterval(function() {
-            if (initSort() || attempts > 20) {
-                clearInterval(interval);
-            }
-            attempts++;
-        }, 100);
-        </script>
-        """,
-        height=0,
-        width=0,
+with st.container(key="ranking_mobile"):
+    render_ranking_frame(
+        visible_items,
+        rankings,
+        profile,
+        mobile=True,
+        view=mobile_view,
+        theme=theme,
+        initial_detail_id=initial_detail_id,
     )
 
 render_footer()
