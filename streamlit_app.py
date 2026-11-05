@@ -1,13 +1,13 @@
+import base64
+import hashlib
 import html
 import inspect
 import logging
-import os
+import math
 import re
 import time
-from datetime import datetime
 from typing import Any
 
-import extra_streamlit_components as stx
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -17,18 +17,18 @@ try:
 except ImportError:
     HAS_KEYUP = False
 
-import access_control
+from access_gate import require_access
 from method_page import build_method_page_html
 from scpi_data import (
     CATEGORY_ORDER,
+    DATA_STORE,
     PROFILE_ORDER,
-    SHEET_ID,
-    WORKSHEETS,
+    SHEET_CACHE_TTL_SECONDS,
+    WEIGHTS_STORE,
     SheetLoadError,
     build_rankings,
     build_weight_matrix,
-    load_google_sheet,
-    load_weights_sheet,
+    validate_join,
     validate_scores,
 )
 
@@ -45,7 +45,6 @@ st.markdown(
     """
     <style>
     /* Self-hosted variable fonts: see README, static/fonts/. */
-    @font-face { font-family: 'DM Sans'; font-style: normal; font-weight: 400 700; font-display: swap; src: url('/app/static/fonts/DMSans-Variable.ttf') format('truetype'); }
     @font-face { font-family: 'Fraunces'; font-style: normal; font-weight: 500 600; font-display: swap; src: url('/app/static/fonts/Fraunces-Variable.ttf') format('truetype'); }
 
     :root {
@@ -102,7 +101,7 @@ st.markdown(
     .brand-divider { width: 1px; height: 1rem; background: rgba(220,237,249,.27); }
     .masthead-body { position: relative; z-index: 1; display: flex; align-items: flex-end; justify-content: space-between; gap: 1.5rem; margin-top: clamp(1.5rem, 3vw, 2.6rem); }
     .masthead-kicker { margin-bottom: .5rem; color: var(--ice); font-size: .68rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
-    .masthead-title { max-width: 780px; color: #fff; font-family: 'Fraunces', Georgia, serif; font-size: clamp(2rem, 4vw, 3.15rem); letter-spacing: -.04em; font-weight: 500; line-height: 1.12; }
+    .masthead-title { max-width: 780px; color: #fff; font-family: 'DM Sans', Georgia, serif; font-size: clamp(2rem, 4vw, 3.15rem); letter-spacing: -.04em; font-weight: 500; line-height: 1.12; }
     .masthead-lede { max-width: 42rem; margin-top: .6rem; color: #c4d4e2; font-size: .98rem; line-height: 1.5; }
     .masthead-tools { display: flex; align-items: center; gap: .55rem; flex: 0 0 auto; }
     .source-badge { flex: 0 0 auto; padding: .58rem .78rem; border: 1px solid rgba(210,231,246,.22); border-radius: 999px; color: #deebf5; background: rgba(255,255,255,.06); font-size: .62rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
@@ -365,6 +364,11 @@ FRAME_JS = """
     var select = document.getElementById('mobile-sort');
     var headers = table ? Array.prototype.slice.call(table.querySelectorAll('th.sort-btn')) : [];
 
+    function toNumber(text) {
+        var number = parseFloat(text);
+        return isNaN(number) ? -Infinity : number;
+    }
+
     function sortRows(column, type, direction) {
         if (!table) { return; }
         var tbody = table.tBodies[0];
@@ -372,9 +376,14 @@ FRAME_JS = """
         rows.sort(function (a, b) {
             var left = a.cells[column].getAttribute('data-sort');
             var right = b.cells[column].getAttribute('data-sort');
-            var result = type === 'num'
-                ? parseFloat(left) - parseFloat(right)
-                : left.localeCompare(right, 'fr');
+            var result;
+            if (type === 'num') {
+                var leftNumber = toNumber(left);
+                var rightNumber = toNumber(right);
+                result = leftNumber === rightNumber ? 0 : (leftNumber < rightNumber ? -1 : 1);
+            } else {
+                result = left.localeCompare(right, 'fr');
+            }
             return direction === 'asc' ? result : -result;
         });
         rows.forEach(function (row) { tbody.appendChild(row); });
@@ -438,13 +447,23 @@ FRAME_JS = """
 })();
 """
 
+# The frame runs with allow-scripts and allow-same-origin, so it is NOT a security boundary.
+# This Content-Security-Policy (set through a <meta> tag in the frame document) is the second
+# line of defence: only the exact script above may run, and nothing can be loaded from or sent
+# to another host, even if an escaping bug ever let markup through.
+_FRAME_JS_HASH = base64.b64encode(hashlib.sha256(FRAME_JS.encode("utf-8")).digest()).decode("ascii")
+FRAME_CSP = (
+    "default-src 'none'; "
+    f"script-src 'sha256-{_FRAME_JS_HASH}'; "
+    "style-src 'unsafe-inline'; "
+    "font-src 'self'; "
+    "base-uri 'none'; "
+    "form-action 'none'"
+)
+
 # ---- Constants ----------------------------------------------------------------
 
 logger = logging.getLogger("scpiscreen")
-ACCESS_CODE = os.environ.get("SCPISCREEN_ACCESS_CODE", "")
-AUTH_COOKIE_NAME = "scpiscreen_access"
-AUTH_COOKIE_TTL_SECONDS = access_control.SESSION_TTL_SECONDS
-BAN_DURATION_HOURS = access_control.BAN_DURATION_SECONDS // 3600
 SEARCH_MAX_LENGTH = 80
 MAX_WARNINGS_DISPLAYED = 8
 MARKDOWN_SPECIAL_CHARACTERS = re.compile(r"([\\`*_\[\]<>|#~])")
@@ -494,15 +513,6 @@ MOBILE_DETAIL_PX = 1150
 
 # ---- Helpers ------------------------------------------------------------------
 
-def current_client_key() -> str | None:
-    """Client IP as seen by Streamlit, or None when it is not available."""
-    address = getattr(st.context, "ip_address", None)
-    if not address:
-        return None
-    text = str(address).strip()
-    return text or None
-
-
 def current_theme() -> str:
     """Streamlit theme type when exposed by the version in use, otherwise an empty string."""
     theme_type = getattr(getattr(st.context, "theme", None), "type", None)
@@ -514,21 +524,6 @@ def md_text(value: str) -> str:
     return MARKDOWN_SPECIAL_CHARACTERS.sub(r"\\\1", html.escape(str(value), quote=False))
 
 
-def render_gate_header() -> None:
-    st.markdown(
-        "<header class='masthead'><div class='brand-line'><span class='brand-mark'>S</span> SCPIScreen</div>"
-        "<div class='masthead-body'><div><div class='masthead-kicker'>Accès privé</div>"
-        "<div class='masthead-title'>Classement des SCPI</div>"
-        "<div class='masthead-lede'>Saisissez votre code d’accès pour continuer.</div></div></div></header>",
-        unsafe_allow_html=True,
-    )
-
-
-def render_ban_notice(until: float) -> None:
-    until_text = datetime.fromtimestamp(until).strftime("%d/%m/%Y à %H:%M")
-    st.error(f"Accès temporairement bloqué depuis cette adresse jusqu’au {until_text}.")
-
-
 def display_percent(value: str) -> str:
     value = str(value).strip()
     if not value:
@@ -537,14 +532,16 @@ def display_percent(value: str) -> str:
     return f"{value}%" if value else "—"
 
 
-def safe_float(val):
+def safe_float(val: Any) -> float:
+    """Sort key for a sheet cell: unusable or non-finite values sort first (-9999)."""
     try:
-        if val is None: return -9999.0
-        s = str(val).replace("%", "").replace("ans", "").replace(" ", "").strip()
-        s = s.replace(",", ".")
-        return float(s) if s else -9999.0
+        if val is None:
+            return -9999.0
+        text = str(val).replace("%", "").replace("ans", "").replace(" ", "").strip().replace(",", ".")
+        number = float(text) if text else -9999.0
     except ValueError:
         return -9999.0
+    return number if math.isfinite(number) else -9999.0
 
 
 def category_class(score: float) -> str:
@@ -624,20 +621,32 @@ def chip_cell(label: str, text: str, sort_text: str) -> str:
 
 
 def render_row(item: dict[str, Any], profile: str) -> str:
-    rank = item["original_rank"]
+    rank = item.get("original_rank")  # None for a SCPI without score row: it is not ranked
+    scored = bool(item.get("has_scores"))
+    sort_rank = item.get("sort_rank", rank or 0)
     name = str(item.get("name", "SCPI"))
     scpi_id = html.escape(str(item.get("scpi_id", "")), quote=True)
-    score = item["profile_scores"].get(profile, 0)
+    score = item["profile_scores"].get(profile, 0.0)
     duree = str(item.get("duree_tri_demembrement", "")).strip()
     if duree and not duree.lower().endswith("ans"):
         duree = f"{duree} ans"
     rank_class = " rank-first" if rank == 1 else ""
+    place_text = f"{rank:02}" if rank is not None else "—"
+    if scored:
+        score_cell = (
+            f"<td class='cell-score' data-label='Note / 100' data-sort='{score}'>"
+            f"<span class='score-pill {category_class(score)}'>{score:.1f}</span></td>"
+        )
+    else:
+        score_cell = (
+            "<td class='cell-score' data-label='Note / 100' data-sort='-1'>"
+            "<span class='score-pill category-unavailable'>—</span></td>"
+        )
     cells = [
-        f"<td class='rank-number{rank_class} cell-place' data-label='Place' data-sort='{rank}'>{rank:02}</td>",
+        f"<td class='rank-number{rank_class} cell-place' data-label='Place' data-sort='{sort_rank}'>{place_text}</td>",
         f"<td class='cell-scpi' data-label='SCPI' data-sort='{html.escape(name.lower(), quote=True)}'>"
         f"<a class='company-link' href='#' data-open='{scpi_id}'>{html.escape(name)}</a></td>",
-        f"<td class='cell-score' data-label='Note / 100' data-sort='{score}'>"
-        f"<span class='score-pill {category_class(score)}'>{score:.1f}</span></td>",
+        score_cell,
         cell_badge("Décote", display_percent(item.get("discount", "")), safe_float(item.get("discount"))),
         cell_badge("PGA", display_percent(item.get("pga", "")), safe_float(item.get("pga"))),
         cell_badge("TRI", display_percent(item.get("tri", "")), safe_float(item.get("tri"))),
@@ -661,7 +670,7 @@ def render_row(item: dict[str, Any], profile: str) -> str:
 
 
 def render_detail(item: dict[str, Any], profile: str) -> str:
-    rank = item["original_rank"]
+    rank = item.get("original_rank")
     scpi_id = html.escape(str(item.get("scpi_id", "")), quote=True)
     name = html.escape(str(item.get("name", "SCPI")))
     category_markup = []
@@ -683,12 +692,16 @@ def render_detail(item: dict[str, Any], profile: str) -> str:
     )
     if not fact_rows:
         fact_cells = "<div class='fact-cell'><div class='fact-label'>Données</div><div class='fact-value'>À renseigner dans le Google Sheet</div></div>"
+    if rank is None:
+        meta = "Non classée · notes absentes de l’onglet Scores"
+    else:
+        meta = f"{rank}e place · Profil {html.escape(profile)}"
     return (
         f"<section class='detail' data-id='{scpi_id}' hidden>"
         "<button type='button' class='back' data-back>← Retour au classement</button>"
         "<article class='scpi-card'>"
         f"<div class='card-top'><div><div class='card-name'>{name}</div>"
-        f"<div class='card-meta'>{rank}e place · Profil {html.escape(profile)}</div></div></div>"
+        f"<div class='card-meta'>{meta}</div></div></div>"
         f"<div class='category-grid'>{''.join(category_markup)}</div>"
         f"<div class='fact-grid'>{fact_cells}</div>"
         "</article></section>"
@@ -704,30 +717,30 @@ def build_mobile_select() -> str:
 
 
 def build_ranking_document(
-    rows_items: list[dict[str, Any]],
-    detail_items: list[dict[str, Any]],
-    profile: str,
+    rows_html: list[str],
+    details_html: str,
     *,
     mobile: bool,
     view: str,
     theme: str,
     initial_detail_id: str | None,
 ) -> str:
+    """Assemble the frame document from rows and detail sheets that are already rendered."""
     view_class = "view-cards" if mobile and view == MOBILE_VIEW_CARDS else "view-table"
     header_cells = "".join(
         f"<th class='sort-btn' data-type='{sort_type}' data-dir='none'>{label} "
         "<span class='icon' style='opacity: 0.3;'>↕</span></th>"
         for _, label, sort_type in TABLE_HEADERS
     )
-    body_rows = [render_row(item, profile) for item in rows_items]
-    if not body_rows:
-        body_rows = ["<tr><td colspan='11' class='empty'>Aucune SCPI ne correspond à votre recherche.</td></tr>"]
-    details = "".join(render_detail(item, profile) for item in detail_items)
+    body_rows = rows_html or [
+        "<tr><td colspan='11' class='empty'>Aucune SCPI ne correspond à votre recherche.</td></tr>"
+    ]
     initial = html.escape(initial_detail_id or "", quote=True)
     detail_class = " show-detail" if initial_detail_id else ""
     select_html = build_mobile_select() if mobile else ""
     return (
         "<!DOCTYPE html><html lang='fr'><head><meta charset='utf-8'>"
+        f"<meta http-equiv=\"Content-Security-Policy\" content=\"{FRAME_CSP}\">"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<style>{FRAME_CSS}</style></head>"
         f"<body class='{theme}'>"
@@ -738,7 +751,7 @@ def build_ranking_document(
         f"<thead><tr>{header_cells}</tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody>"
         "</table></div></div>"
-        f"{details}</div>"
+        f"{details_html}</div>"
         f"<script>{FRAME_JS}</script>"
         "</body></html>"
     )
@@ -754,9 +767,8 @@ def frame_height(row_count: int, *, mobile: bool, view: str) -> int:
 
 
 def render_ranking_frame(
-    rows_items: list[dict[str, Any]],
-    detail_items: list[dict[str, Any]],
-    profile: str,
+    rows_html: list[str],
+    details_html: str,
     *,
     mobile: bool,
     view: str,
@@ -764,9 +776,8 @@ def render_ranking_frame(
     initial_detail_id: str | None,
 ) -> None:
     document = build_ranking_document(
-        rows_items,
-        detail_items,
-        profile,
+        rows_html,
+        details_html,
         mobile=mobile,
         view=view,
         theme=theme,
@@ -774,119 +785,66 @@ def render_ranking_frame(
     )
     components.html(
         document,
-        height=frame_height(len(rows_items), mobile=mobile, view=view),
+        height=frame_height(len(rows_html), mobile=mobile, view=view),
         scrolling=True,
     )
 
 
-# ---- Access gate --------------------------------------------------------------
+@st.cache_data(ttl=SHEET_CACHE_TTL_SECONDS, max_entries=16, show_spinner=False)
+def build_profile_view(version: int, profile: str, _data: dict[str, list[dict[str, str]]]) -> dict[str, Any]:
+    """Ranking of one profile, rendered once per data version (not on every keystroke).
 
-if len(ACCESS_CODE) < access_control.ACCESS_CODE_MIN_LENGTH:
-    st.error(
-        "Authentification non configurée : définissez SCPISCREEN_ACCESS_CODE "
-        f"({access_control.ACCESS_CODE_MIN_LENGTH} caractères minimum) dans l’environnement du serveur."
+    `version` and `profile` are the cache key; `_data` is not hashed (leading underscore).
+    SCPI without a score row come last and are not numbered.
+    """
+    rankings = build_rankings(_data)
+    rankings.sort(
+        key=lambda item: (item["has_scores"], item["profile_scores"].get(profile, 0.0)),
+        reverse=True,
     )
-    st.stop()
+    rank = 0
+    for position, item in enumerate(rankings, start=1):
+        if item["has_scores"]:
+            rank += 1
+            item["original_rank"] = rank
+        else:
+            item["original_rank"] = None
+        item["sort_rank"] = position
+    return {
+        "rows": [
+            {
+                "id": item["scpi_id"],
+                "name_lower": str(item["name"]).lower(),
+                "html": render_row(item, profile),
+            }
+            for item in rankings
+        ],
+        "details_html": "".join(render_detail(item, profile) for item in rankings),
+        "warnings": validate_scores(_data) + validate_join(_data),
+    }
 
-access_control.configure_audit_log(ACCESS_CODE.encode("utf-8"))
-client_key = current_client_key()  # None when Streamlit does not expose the address
-cookie_manager = stx.CookieManager(key="scpiscreen_auth_cookie")
 
+# ---- Access gate --------------------------------------------------------------
+# Everything below this line is only reached by a visitor who passed the gate.
 
-def fallback_ban_until() -> float | None:
-    """Per-browser-session ban, used only when the client address is unavailable."""
-    until = st.session_state.get("fallback_banned_until")
-    if isinstance(until, (int, float)) and until > time.time():
-        return float(until)
-    return None
-
-
-try:
-    if client_key is not None:
-        banned_until = access_control.ban_until(client_key)
-    else:
-        banned_until = fallback_ban_until()
-    if banned_until is None and not st.session_state.get("access_granted", False):
-        if access_control.is_valid_session(cookie_manager.get(AUTH_COOKIE_NAME)):
-            st.session_state["access_granted"] = True
-except access_control.AccessStateError:
-    logger.exception("Access state file unreadable")
-    render_gate_header()
-    st.error("Le contrôle d’accès est temporairement indisponible. Contactez l’administrateur.")
-    st.stop()
-
-if banned_until is not None:
-    access_control.log_event("ban_refused", client_key)
-    render_gate_header()
-    render_ban_notice(banned_until)
-    st.stop()
-
-if not st.session_state.get("access_granted", False):
-    render_gate_header()
-    with st.form("access_gate"):
-        access_code = st.text_input("Code d’accès", type="password")
-        access_submitted = st.form_submit_button("Accéder au classement", type="primary", use_container_width=True)
-    if access_submitted:
-        try:
-            if access_control.access_code_matches(access_code, ACCESS_CODE):
-                session_token = access_control.create_session()
-                if client_key is not None:
-                    access_control.clear_failures(client_key)
-                st.session_state.pop("fallback_failures", None)
-                st.session_state.pop("fallback_banned_until", None)
-                st.session_state["access_granted"] = True
-                access_control.log_event("login_success", client_key)
-                cookie_manager.set(
-                    AUTH_COOKIE_NAME,
-                    session_token,
-                    key="save_scpiscreen_access",
-                    max_age=AUTH_COOKIE_TTL_SECONDS,
-                    secure=True,
-                    same_site="strict",
-                )
-            else:
-                if client_key is not None:
-                    remaining = access_control.record_failure(client_key)
-                else:
-                    failures = int(st.session_state.get("fallback_failures", 0)) + 1
-                    st.session_state["fallback_failures"] = failures
-                    remaining = max(0, access_control.MAX_FAILED_ATTEMPTS - failures)
-                    if remaining == 0:
-                        st.session_state["fallback_banned_until"] = time.time() + access_control.BAN_DURATION_SECONDS
-                access_control.log_event("login_failed", client_key, remaining=remaining)
-                if remaining == 0:
-                    access_control.log_event("ban_created", client_key, hours=BAN_DURATION_HOURS)
-                    st.error(f"Trop de tentatives. Accès bloqué pendant {BAN_DURATION_HOURS} heures.")
-                else:
-                    st.error(f"Code d’accès incorrect. Il vous reste {remaining} tentative(s).")
-        except access_control.AccessStateError:
-            logger.exception("Access state file unreadable during login")
-            st.error("Le contrôle d’accès est temporairement indisponible. Contactez l’administrateur.")
-    if not st.session_state.get("access_granted", False):
-        st.stop()
+require_access()
 
 
 # ---- Data loading -----------------------------------------------------------
 
-@st.cache_data(ttl=900, show_spinner=False)
-def cached_sheet_data(sheet_id: str) -> dict[str, list[dict[str, str]]]:
-    return load_google_sheet(sheet_id, WORKSHEETS)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def cached_weights_data(sheet_id: str) -> list[list[str]]:
-    return load_weights_sheet(sheet_id)
-
-
 load_error = ""
+data_version = 0
+stale_age_minutes: int | None = None
+data: dict[str, list[dict[str, str]]] = {"data": [], "scores": []}
 try:
-    data = cached_sheet_data(SHEET_ID)
+    data_result = DATA_STORE.get()
+    data, data_version = data_result.value, data_result.version
+    if data_result.stale:
+        stale_age_minutes = max(1, int((time.time() - data_result.loaded_at) // 60))
 except SheetLoadError as error:
-    data = {"data": [], "scores": []}
     load_error = str(error)
 except Exception:
     logger.exception("Unexpected error while loading the Google Sheet")
-    data = {"data": [], "scores": []}
     load_error = "Erreur interne lors du chargement des données."
 
 masthead_status = "Source connectée"
@@ -923,15 +881,16 @@ def render_footer() -> None:
 def render_method_page() -> None:
     """Render the ranking methodology page from the weights tab."""
     try:
-        matrix = build_weight_matrix(cached_weights_data(SHEET_ID))
+        matrix = build_weight_matrix(WEIGHTS_STORE.get().value)
+        page_html = build_method_page_html(matrix)
     except SheetLoadError as error:
         st.error(md_text(f"Les pondérations du Google Sheet ne sont pas accessibles : {error}"))
         return
     except Exception:
-        logger.exception("Unexpected error while building the weights matrix")
+        logger.exception("Unexpected error while building the method page")
         st.error("Les pondérations ne peuvent pas être affichées.")
         return
-    st.markdown(build_method_page_html(matrix), unsafe_allow_html=True)
+    st.markdown(page_html, unsafe_allow_html=True)
 
 
 def handle_page_change() -> None:
@@ -984,24 +943,23 @@ with profile_column:
     )
 profile = profile or PROFILE_ORDER[0]
 
-try:
-    rankings = build_rankings(data)
-except Exception:
-    logger.exception("Unexpected error while building the rankings")
-    rankings = []
-    load_error = load_error or "Erreur interne lors de la préparation des données."
+view: dict[str, Any] = {"rows": [], "details_html": "", "warnings": []}
+if not load_error:
+    try:
+        view = build_profile_view(data_version, profile, data)
+    except Exception:
+        logger.exception("Unexpected error while building the rankings")
+        load_error = "Erreur interne lors de la préparation des données."
 
-# Default ranking (profile score) on Python side
-rankings.sort(key=lambda item: item["profile_scores"].get(profile, 0), reverse=True)
-
-# Store original rank
-for i, item in enumerate(rankings, start=1):
-    item["original_rank"] = i
-
-data_warnings = [] if load_error else validate_scores(data)
+data_warnings = view["warnings"]
 
 if load_error:
     st.error(f"Les données du Google Sheet ne sont pas accessibles : {md_text(load_error)}")
+if stale_age_minutes is not None:
+    st.warning(
+        f"La source Google Sheets est momentanément inaccessible : les données affichées "
+        f"datent d’environ {stale_age_minutes} minute(s)."
+    )
 for message in data_warnings[:MAX_WARNINGS_DISPLAYED]:
     st.warning(md_text(message))
 if len(data_warnings) > MAX_WARNINGS_DISPLAYED:
@@ -1011,7 +969,7 @@ if len(data_warnings) > MAX_WARNINGS_DISPLAYED:
 # Deep link to a SCPI sheet: applied on the first render of a session only, so later
 # reruns (search, profile, view) keep the table, while the URL stays shareable.
 requested_scpi = str(st.query_params.get("scpi", "") or "")
-known_ids = {item["scpi_id"] for item in rankings}
+known_ids = {row["id"] for row in view["rows"]}
 initial_detail_id: str | None = None
 if requested_scpi and requested_scpi not in known_ids:
     st.error("Cette fiche SCPI est introuvable dans la source de données.")
@@ -1070,17 +1028,16 @@ with col_search:
 
 search_text = str(search_query or "").strip()[:SEARCH_MAX_LENGTH]
 search_lower = search_text.lower()
-visible_items = [
-    item for item in rankings
-    if not search_lower or search_lower in item.get("name", "").lower()
+visible_rows = [
+    row["html"] for row in view["rows"]
+    if not search_lower or search_lower in row["name_lower"]
 ]
 
 theme = current_theme()
 with st.container(key="ranking_desktop"):
     render_ranking_frame(
-        visible_items,
-        rankings,
-        profile,
+        visible_rows,
+        view["details_html"],
         mobile=False,
         view=MOBILE_VIEW_TABLE,
         theme=theme,
@@ -1088,9 +1045,8 @@ with st.container(key="ranking_desktop"):
     )
 with st.container(key="ranking_mobile"):
     render_ranking_frame(
-        visible_items,
-        rankings,
-        profile,
+        visible_rows,
+        view["details_html"],
         mobile=True,
         view=mobile_view,
         theme=theme,

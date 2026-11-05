@@ -1,7 +1,7 @@
 [project]
 name = "SCPIScreen"
 version = "0.1.0"
-description = "Classement des sCPI"
+description = "Classement des SCPI"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

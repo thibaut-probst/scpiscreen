@@ -7,6 +7,7 @@ that Streamlit's Markdown renderer never mistakes them for code blocks.
 from __future__ import annotations
 
 import html
+import math
 from typing import Any
 
 NBSP = "\u00a0"
@@ -16,8 +17,8 @@ TOP_CRITERIA_PER_PROFILE = 5
 
 
 def format_weight(value: float) -> str:
-    """Format a weight as a French percentage; zero is shown as a dash."""
-    if value <= 0:
+    """Format a weight as a French percentage; zero (or an unusable value) is shown as a dash."""
+    if not math.isfinite(value) or value <= 0:
         return "—"
     if abs(value - round(value)) < 0.05:
         text = f"{round(value):d}"
@@ -28,14 +29,14 @@ def format_weight(value: float) -> str:
 
 def _heat_style(value: float, max_weight: float) -> str:
     """Inline CSS variable used to shade a weight cell proportionally to its weight."""
-    if value <= 0 or max_weight <= 0:
+    if not math.isfinite(value) or not math.isfinite(max_weight) or value <= 0 or max_weight <= 0:
         return ""
     heat = round(min(value / max_weight, 1.0) * HEAT_MAX_PERCENT)
     return f" style='--heat:{heat}%'"
 
 
 def _weight_cell(value: float, max_weight: float) -> str:
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         return "<td class='weight-cell is-zero'>—</td>"
     return f"<td class='weight-cell'{_heat_style(value, max_weight)}>{format_weight(value)}</td>"
 

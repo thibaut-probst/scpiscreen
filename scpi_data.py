@@ -6,10 +6,15 @@ import csv
 import io
 import logging
 import math
+import re
+import threading
+import time
 import unicodedata
 import urllib.parse
 import urllib.request
-from typing import Any
+from collections import Counter
+from dataclasses import dataclass
+from typing import Any, Callable, Generic, TypeVar
 
 logger = logging.getLogger("scpiscreen.data")
 
@@ -24,6 +29,11 @@ WORKSHEETS = {
 WEIGHTS_WORKSHEET = "Pondérations"
 WEIGHTS_HEADER_ROWS = 2
 UNCATEGORIZED_LABEL = "Autres critères"
+
+# Header of the Data column whose values are the SCPI names written in the Scores tab
+# ("Catégorie SCPI"). Leave empty to detect it automatically: the Data column (the "SCPI"
+# column by default) whose values match the most Scores names is used.
+DATA_NAME_COLUMN = ""
 
 CATEGORY_ORDER = [
     "Structure financière",
@@ -48,6 +58,16 @@ SCORE_MAX = 100.0
 SHEET_HOST = "docs.google.com"
 SHEET_TIMEOUT_SECONDS = 12
 MAX_SHEET_RESPONSE_BYTES = 8 * 1024 * 1024
+
+# Availability limits: the page embeds one detail sheet per SCPI, so the row count is capped.
+MAX_SCPI_ROWS = 300
+MAX_WEIGHT_COLUMNS = 100
+WEIGHT_MAX = 100.0
+
+# Cache: data stays valid for 15 minutes; after a failed refresh the last good data is kept
+# (marked as stale) and the source is not queried again for RETRY_AFTER seconds.
+SHEET_CACHE_TTL_SECONDS = 900
+SHEET_RETRY_AFTER_SECONDS = 60
 
 
 class SheetLoadError(RuntimeError):
@@ -141,13 +161,15 @@ def load_google_sheet(sheet_id: str, worksheets: dict[str, str]) -> dict[str, li
 
 
 def _number(value: Any, default: float = 0.0) -> float:
+    """Lenient number parser. Non-numeric and non-finite values (nan, inf) return the default."""
     if value is None or str(value).strip() == "":
         return default
     normalized = str(value).strip().replace("%", "").replace(" ", "").replace(",", ".")
     try:
-        return float(normalized)
+        number = float(normalized)
     except ValueError:
         return default
+    return number if math.isfinite(number) else default
 
 
 def parse_score(value: Any) -> float | None:
@@ -163,69 +185,99 @@ def parse_score(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _name_key(value: Any) -> str:
-    return " ".join(str(value).casefold().split())
+def validated_score(value: Any) -> float:
+    """A score as displayed: finite and within 0 to 100, otherwise 0 (as the warning banner says)."""
+    number = parse_score(value)
+    if number is None or not SCORE_MIN <= number <= SCORE_MAX:
+        return 0.0
+    return number
 
 
-def _score_rows_are_aligned(
-    data_rows: list[dict[str, str]], score_rows: list[dict[str, str]]
-) -> bool:
-    if not data_rows or len(data_rows) != len(score_rows):
-        return False
+def _slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", _text_key(name)).strip("-") or "scpi"
 
-    checked_rows = 0
-    for data_row, score_row in zip(data_rows, score_rows):
-        liquidity_rate = data_row.get("Taux de liquidité", "").strip()
-        if not liquidity_rate:
+
+def _unique_id(name: str, used: set[str]) -> str:
+    base = _slug(name)
+    candidate, counter = base, 2
+    while candidate in used:
+        candidate = f"{base}-{counter}"
+        counter += 1
+    used.add(candidate)
+    return candidate
+
+
+def resolve_name_column(data: dict[str, list[dict[str, str]]]) -> str:
+    """Header of the Data column that holds the names used in the Scores tab."""
+    if DATA_NAME_COLUMN:
+        return DATA_NAME_COLUMN
+    rows = data.get("data", [])
+    score_keys = {
+        _text_key(label)
+        for label in (row.get("Catégorie SCPI", "").strip() for row in data.get("scores", []))
+        if label
+    }
+    if not rows or not score_keys:
+        return "SCPI"
+
+    def matches(column: str) -> int:
+        return sum(1 for row in rows if _text_key(row.get(column, "")) in score_keys)
+
+    best, best_count = "SCPI", matches("SCPI")
+    for column in rows[0]:
+        if column == "SCPI":
             continue
-        expected_score = max(0, min(100, _number(liquidity_rate)))
-        actual_score = _number(
-            score_row.get("Structure financière Taux de liquidité")
-        )
-        if expected_score != actual_score:
-            return False
-        checked_rows += 1
+        count = matches(column)
+        if count > best_count:
+            best, best_count = column, count
+    return best
 
-    return checked_rows > 0
+
+def _row_name(row: dict[str, str], column: str) -> str:
+    return (row.get(column) or "").strip() or row.get("SCPI", "").strip()
 
 
 def build_rankings(data: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]]:
-    """Join SCPI data with the final, precomputed scores from the Scores worksheet."""
+    """Join SCPI data with the final, precomputed scores from the Scores worksheet.
+
+    The join is strict: a SCPI is matched to a score row by name only (case, accents and
+    spacing are ignored). There is no positional fallback. A SCPI without a score row is
+    returned with has_scores=False and is never ranked. Duplicated score labels use the first row.
+    """
     rows = data.get("data", [])
     score_rows = data.get("scores", [])
-    score_by_name = {
-        _name_key(row.get("Catégorie SCPI", "")): row
-        for row in score_rows
-        if row.get("Catégorie SCPI", "").strip()
-    }
-    scores_are_row_aligned = _score_rows_are_aligned(rows, score_rows)
+    score_by_name: dict[str, dict[str, str]] = {}
+    for row in score_rows:
+        label = row.get("Catégorie SCPI", "").strip()
+        if label:
+            score_by_name.setdefault(_text_key(label), row)
 
-    results = []
-    for row_index, row in enumerate(rows):
-        name = row.get("SCPI", "").strip()
+    name_column = resolve_name_column(data)
+    results: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for row in rows:
+        name = _row_name(row, name_column)
         if not name:
             continue
-        code_name = _name_key(name)
-        score_row = score_by_name.get(code_name, {})
-        if not score_row and scores_are_row_aligned:
-            score_row = score_rows[row_index]
-            name = score_row.get("Catégorie SCPI", "").strip() or name
+        if len(results) >= MAX_SCPI_ROWS:
+            break
+        score_row = score_by_name.get(_text_key(name))
+        has_scores = score_row is not None
+        scores = score_row or {}
         profile_scores = {
-            profile: _number(score_row.get(column, 0.0))
+            profile: validated_score(scores.get(column)) if has_scores else 0.0
             for profile, column in PROFILE_SCORE_COLUMNS.items()
         }
-        category_scores = {
-            "Structure financière": _number(score_row.get("Structure financière", 0.0)),
-            "Diversification": _number(score_row.get("Diversification", 0.0)),
-            "Sécurité locative": _number(score_row.get("Sécurité locative", 0.0)),
-            "Maturité": _number(score_row.get("Maturité", 0.0)),
-            "Rentabilité": _number(score_row.get("Rentabilité", 0.0)),
+        category_scores: dict[str, float | None] = {
+            category: validated_score(scores.get(category)) if has_scores else None
+            for category in CATEGORY_ORDER
         }
         main_sectors = row.get("Secteurs majoritaires", "").strip() or row.get("Stratégie sectorielle", "").strip()
         main_regions = row.get("Régions majoritaires", "").strip() or row.get("Région majoritaire", "").strip()
         item = {
-            "scpi_id": _name_key(name).replace(" ", "-"),
+            "scpi_id": _unique_id(name, used_ids),
             "name": name,
+            "has_scores": has_scores,
             "manager": "",
             "strategy": row.get("Stratégie sectorielle", "").strip(),
             "market": row.get("Région majoritaire", "").strip(),
@@ -302,9 +354,74 @@ def validate_scores(data: dict[str, list[dict[str, str]]]) -> list[str]:
     return messages
 
 
+def _summarize(labels: list[str], limit: int = 5) -> str:
+    listed = ", ".join(labels[:limit])
+    remaining = len(labels) - limit
+    return f"{listed} et {remaining} autre(s)" if remaining > 0 else listed
+
+
+def _duplicates(labels: list[str]) -> list[str]:
+    counts = Counter(_text_key(label) for label in labels)
+    seen: set[str] = set()
+    repeated = []
+    for label in labels:
+        key = _text_key(label)
+        if counts[key] > 1 and key not in seen:
+            seen.add(key)
+            repeated.append(label)
+    return repeated
+
+
+def validate_join(data: dict[str, list[dict[str, str]]]) -> list[str]:
+    """Warnings about the link between the Data and Scores tabs (empty list when all is well)."""
+    rows = data.get("data", [])
+    score_rows = data.get("scores", [])
+    if not rows and not score_rows:
+        return []
+    name_column = resolve_name_column(data)
+    data_names = [name for name in (_row_name(row, name_column) for row in rows) if name]
+    score_labels = [
+        label for label in (row.get("Catégorie SCPI", "").strip() for row in score_rows) if label
+    ]
+    data_keys = {_text_key(name) for name in data_names}
+    score_keys = {_text_key(label) for label in score_labels}
+
+    messages: list[str] = []
+    unmatched = [name for name in data_names if _text_key(name) not in score_keys]
+    if unmatched:
+        messages.append(
+            "Aucune ligne de l’onglet « Scores » ne correspond à : "
+            f"{_summarize(unmatched)}. Ces SCPI ne sont pas classées."
+        )
+    orphans = [label for label in score_labels if _text_key(label) not in data_keys]
+    if orphans:
+        messages.append(
+            "Ces lignes de l’onglet « Scores » ne correspondent à aucune SCPI de l’onglet « Data » "
+            f"et sont ignorées : {_summarize(orphans)}."
+        )
+    repeated_data = _duplicates(data_names)
+    if repeated_data:
+        messages.append(f"Nom en double dans l’onglet « Data » : {_summarize(repeated_data)}.")
+    repeated_scores = _duplicates(score_labels)
+    if repeated_scores:
+        messages.append(
+            "Nom en double dans l’onglet « Scores » (la première ligne est utilisée) : "
+            f"{_summarize(repeated_scores)}."
+        )
+    if len(data_names) > MAX_SCPI_ROWS:
+        messages.append(
+            f"Seules les {MAX_SCPI_ROWS} premières SCPI de l’onglet « Data » sont affichées "
+            f"({len(data_names)} trouvées)."
+        )
+    return messages
+
+
+_LIGATURES = str.maketrans({"œ": "oe", "Œ": "OE", "æ": "ae", "Æ": "AE", "’": "'", "‘": "'", "ʼ": "'"})
+
+
 def _text_key(value: Any) -> str:
-    """Normalize a label for tolerant comparison (case, accents, spacing)."""
-    decomposed = unicodedata.normalize("NFKD", str(value))
+    """Normalize a label for tolerant comparison (case, accents, ligatures, apostrophes, spacing)."""
+    decomposed = unicodedata.normalize("NFKD", str(value).translate(_LIGATURES))
     stripped = "".join(char for char in decomposed if not unicodedata.combining(char))
     return " ".join(stripped.casefold().split())
 
@@ -382,7 +499,7 @@ def build_weight_matrix(rows: list[list[str]]) -> dict[str, Any]:
             columns.append((index, category, criterion))
     columns = [
         column for column in columns if column[2] and _text_key(column[2]) != "total"
-    ]
+    ][:MAX_WEIGHT_COLUMNS]
     if not columns:
         raise SheetLoadError("Aucun critère trouvé dans l’onglet « Pondérations ».")
 
@@ -391,12 +508,12 @@ def build_weight_matrix(rows: list[list[str]]) -> dict[str, Any]:
     for profile in profiles:
         row = profile_rows[profile]
         values = [
-            max(0.0, _number("".join(row[index].split()))) if index < len(row) else 0.0
+            min(max(0.0, _number("".join(row[index].split()))), WEIGHT_MAX) if index < len(row) else 0.0
             for index, _, _ in columns
         ]
         # Fractions such as 0.04 (instead of 4 %) are converted to percentages.
         if 0 < sum(values) <= 1.5:
-            values = [value * 100 for value in values]
+            values = [min(value * 100, WEIGHT_MAX) for value in values]
         weights_by_profile[profile] = values
 
     criteria = [
@@ -415,3 +532,114 @@ def build_weight_matrix(rows: list[list[str]]) -> dict[str, Any]:
             categories.append(category)
 
     return {"profiles": profiles, "categories": categories, "criteria": criteria}
+
+
+# ---- Cache with stale-if-error -------------------------------------------------------
+
+_V = TypeVar("_V")
+
+
+@dataclass(frozen=True)
+class StoreResult(Generic[_V]):
+    """Cached value. Treat it as read-only: it is shared between all sessions."""
+
+    value: _V
+    version: int  # incremented on every successful refresh
+    loaded_at: float  # timestamp of the last successful load
+    stale: bool  # True when the last refresh failed and older data is served
+
+
+class TTLStore(Generic[_V]):
+    """Process-wide cache: one refresh at a time, last good value kept when the source fails."""
+
+    def __init__(
+        self,
+        loader: Callable[[], _V],
+        *,
+        ttl: float,
+        retry_after: float,
+        name: str,
+    ) -> None:
+        self._loader = loader
+        self._ttl = ttl
+        self._retry_after = retry_after
+        self._name = name
+        self._state_lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
+        self._value: _V | None = None
+        self._has_value = False
+        self._version = 0
+        self._loaded_at = 0.0
+        self._next_attempt = 0.0
+        self._last_error = ""
+
+    def _result(self, stale: bool) -> StoreResult[_V]:
+        # Callers hold _state_lock and know _has_value is True.
+        return StoreResult(self._value, self._version, self._loaded_at, stale)  # type: ignore[arg-type]
+
+    def _fresh(self, now: float) -> bool:
+        return self._has_value and now - self._loaded_at < self._ttl
+
+    def get(self) -> StoreResult[_V]:
+        """Return the cached value, refreshing it when needed.
+
+        Raises SheetLoadError only when no value has ever been loaded successfully.
+        """
+        with self._state_lock:
+            now = time.time()
+            if self._fresh(now):
+                return self._result(False)
+            if now < self._next_attempt:  # a refresh failed recently: do not hammer the source
+                if self._has_value:
+                    return self._result(True)
+                raise SheetLoadError(self._last_error)
+            have_value = self._has_value
+
+        # Without any value everybody waits for the single refresh; otherwise stale data is served meanwhile.
+        if not self._refresh_lock.acquire(blocking=not have_value):
+            with self._state_lock:
+                return self._result(True)
+        try:
+            with self._state_lock:
+                if self._fresh(time.time()):  # another thread refreshed while we waited
+                    return self._result(False)
+            try:
+                value = self._loader()
+            except SheetLoadError as error:
+                message = str(error)
+                logger.warning("Refresh of %r failed: %s", self._name, message)
+            except Exception:
+                logger.exception("Unexpected error while refreshing %r", self._name)
+                message = "Erreur interne lors du chargement des données."
+            else:
+                with self._state_lock:
+                    self._value = value
+                    self._has_value = True
+                    self._version += 1
+                    self._loaded_at = time.time()
+                    self._next_attempt = 0.0
+                    self._last_error = ""
+                    return self._result(False)
+            with self._state_lock:
+                self._next_attempt = time.time() + self._retry_after
+                self._last_error = message
+                if self._has_value:
+                    return self._result(True)
+            raise SheetLoadError(message)
+        finally:
+            self._refresh_lock.release()
+
+
+# Shared by every session. Streamlit keeps imported modules alive between reruns.
+DATA_STORE: TTLStore[dict[str, list[dict[str, str]]]] = TTLStore(
+    lambda: load_google_sheet(SHEET_ID, WORKSHEETS),
+    ttl=SHEET_CACHE_TTL_SECONDS,
+    retry_after=SHEET_RETRY_AFTER_SECONDS,
+    name="data",
+)
+WEIGHTS_STORE: TTLStore[list[list[str]]] = TTLStore(
+    lambda: load_weights_sheet(SHEET_ID),
+    ttl=SHEET_CACHE_TTL_SECONDS,
+    retry_after=SHEET_RETRY_AFTER_SECONDS,
+    name="weights",
+)

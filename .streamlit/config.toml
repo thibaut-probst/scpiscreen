@@ -1,2 +1,35 @@
+# SCPIScreen: Streamlit configuration. Place this file at .streamlit/config.toml
+# and start the app from the project root so that it is loaded.
+
+[server]
+# Keep XSRF protection on. enableCORS is deliberately NOT set: Streamlit forces it back
+# to true whenever XSRF protection is on, so setting it to false had no effect.
+enableXsrfProtection = true
+# Serves static/ (fonts) WITHOUT authentication: put nothing but fonts in that folder.
+enableStaticServing = true
+# Largest WebSocket message in MB (default 200). The page embeds one detail sheet per SCPI,
+# about 1 to 3 MB for 100 to 300 SCPI. Raise it only if you see a "message size" error.
+maxMessageSize = 20
+# Production: no file watching or run-on-save. For local development start with
+#   uv run streamlit run streamlit_app.py --server.fileWatcherType auto --server.runOnSave true
+fileWatcherType = "none"
+runOnSave = false
+headless = true
+enableWebsocketCompression = false
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# Error details stay in the server log; visitors only see a generic message.
+showErrorDetails = "none"
+# Hides the developer toolbar (Deploy, etc.) for visitors.
+toolbarMode = "viewer"
+
 [theme]
-primaryColor = "#69AEFA"
+# Accent colour (selected page and profile buttons). Without it Streamlit falls back to its
+# default red. Same teal as the page styles (--blue in streamlit_app.py).
+primaryColor = "#087e74"
+# Optional lighter accent for dark mode (supported by recent Streamlit versions):
+# [theme.dark]
+# primaryColor = "#72d5bf"
