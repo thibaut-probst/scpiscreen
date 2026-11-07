@@ -10,14 +10,15 @@ cannot forget part of it. The page styles (masthead classes) must be injected be
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 from datetime import datetime
 from urllib.parse import urlsplit
 
-import extra_streamlit_components as stx
 import streamlit as st
+import streamlit.components.v1 as components
 
 import access_control
 
@@ -32,6 +33,7 @@ ACCESS_CODE_MAX_INPUT = 256
 BAN_DURATION_HOURS = access_control.BAN_DURATION_SECONDS // 3600
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 SESSION_FLAG = "access_granted"
+PENDING_COOKIE_KEY = "pending_session_cookie"
 
 
 # ---- Helpers ----------------------------------------------------------------------
@@ -80,7 +82,7 @@ def _connection_is_insecure() -> bool:
 
 
 def _read_auth_cookie() -> str | None:
-    """Session cookie from the browser request, read on the server (no third-party component)."""
+    """Session cookie sent by the browser with the connection, read on the server."""
     cookies = getattr(st.context, "cookies", None)
     if cookies is None:
         return None
@@ -128,6 +130,29 @@ def _unavailable() -> None:
     st.stop()
 
 
+def _persist_cookie() -> None:
+    """Write the session cookie from the page itself, with exact attributes.
+
+    A tiny script runs in a same-origin frame and sets the cookie on the page (Path=/, Secure,
+    SameSite=Strict, one year), which is what the __Host- prefix requires and what the server
+    receives on the next visit. The frame is rendered again on every run of this session, so
+    a rerun right after the login cannot remove it before it has executed.
+    """
+    token = st.session_state.get(PENDING_COOKIE_KEY)
+    if not token:
+        return
+    cookie = (
+        f"{AUTH_COOKIE_NAME}={token}; Max-Age={AUTH_COOKIE_TTL_SECONDS}; "
+        "Path=/; Secure; SameSite=Strict"
+    )
+    script = (
+        "<script>(function(){var c=" + json.dumps(cookie) + ";"
+        "try{window.parent.document.cookie=c;}catch(e){document.cookie=c;}})();</script>"
+    )
+    with st.container(key="cookie_setter"):
+        components.html(script, height=0)
+
+
 # ---- Login form -------------------------------------------------------------------
 
 
@@ -140,8 +165,6 @@ def _render_login(access_code: str, client_key: str | None) -> None:
         )
         st.stop()
 
-    # The component is only needed to write the cookie, so it exists on this path only.
-    cookie_manager = stx.CookieManager(key="scpiscreen_auth_cookie")
     # Header and form live in a placeholder so that they disappear as soon as the login succeeds.
     gate_area = st.empty()
     with gate_area.container():
@@ -176,14 +199,7 @@ def _render_login(access_code: str, client_key: str | None) -> None:
             st.session_state[SESSION_FLAG] = True
             gate_area.empty()
             access_control.log_event("login_success", client_key)
-            cookie_manager.set(
-                AUTH_COOKIE_NAME,
-                session_token,
-                key="save_scpiscreen_access",
-                max_age=AUTH_COOKIE_TTL_SECONDS,
-                secure=True,
-                same_site="strict",
-            )
+            st.session_state[PENDING_COOKIE_KEY] = session_token
             return
 
         access_control.log_event("login_failed", client_key, remaining=decision.remaining)
@@ -219,6 +235,7 @@ def require_access() -> None:
         if banned_until is None and not st.session_state.get(SESSION_FLAG, False):
             if access_control.is_valid_session(_read_auth_cookie()):
                 st.session_state[SESSION_FLAG] = True
+                access_control.log_event("session_resumed", client_key)
     except access_control.AccessStateError:
         logger.exception("Access state unreadable")
         _unavailable()
@@ -230,9 +247,8 @@ def require_access() -> None:
         render_ban_notice(banned_until)
         st.stop()
 
-    if st.session_state.get(SESSION_FLAG, False):
-        return
-
-    _render_login(access_code, client_key)
     if not st.session_state.get(SESSION_FLAG, False):
-        st.stop()
+        _render_login(access_code, client_key)
+        if not st.session_state.get(SESSION_FLAG, False):
+            st.stop()
+    _persist_cookie()

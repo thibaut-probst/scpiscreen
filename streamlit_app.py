@@ -45,6 +45,7 @@ st.markdown(
     """
     <style>
     /* Self-hosted variable fonts: see README, static/fonts/. */
+    @font-face { font-family: 'DM Sans'; font-style: normal; font-weight: 400 700; font-display: swap; src: url('/app/static/fonts/DMSans-Variable.ttf') format('truetype'); }
     @font-face { font-family: 'Fraunces'; font-style: normal; font-weight: 500 600; font-display: swap; src: url('/app/static/fonts/Fraunces-Variable.ttf') format('truetype'); }
 
     :root {
@@ -101,7 +102,7 @@ st.markdown(
     .brand-divider { width: 1px; height: 1rem; background: rgba(220,237,249,.27); }
     .masthead-body { position: relative; z-index: 1; display: flex; align-items: flex-end; justify-content: space-between; gap: 1.5rem; margin-top: clamp(1.5rem, 3vw, 2.6rem); }
     .masthead-kicker { margin-bottom: .5rem; color: var(--ice); font-size: .68rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
-    .masthead-title { max-width: 780px; color: #fff; font-family: 'DM Sans', Georgia, serif; font-size: clamp(2rem, 4vw, 3.15rem); letter-spacing: -.04em; font-weight: 500; line-height: 1.12; }
+    .masthead-title { max-width: 780px; color: #fff; font-family: 'Fraunces', Georgia, serif; font-size: clamp(2rem, 4vw, 3.15rem); letter-spacing: -.04em; font-weight: 500; line-height: 1.12; }
     .masthead-lede { max-width: 42rem; margin-top: .6rem; color: #c4d4e2; font-size: .98rem; line-height: 1.5; }
     .masthead-tools { display: flex; align-items: center; gap: .55rem; flex: 0 0 auto; }
     .source-badge { flex: 0 0 auto; padding: .58rem .78rem; border: 1px solid rgba(210,231,246,.22); border-radius: 999px; color: #deebf5; background: rgba(255,255,255,.06); font-size: .62rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
@@ -136,6 +137,7 @@ st.markdown(
     .st-key-search_clear [data-testid="stButton"] button { min-height: 1.9rem !important; min-width: 1.9rem; padding: 0 .5rem; border: 0 !important; border-radius: 8px; color: var(--muted) !important; background: transparent !important; font-size: .85rem; line-height: 1; transform: none; }
     .st-key-search_clear [data-testid="stButton"] button:hover, .st-key-search_clear [data-testid="stButton"] button:focus-visible { color: var(--ink) !important; background: var(--blue-pale) !important; transform: none; }
     .st-key-page_navigation { margin-bottom: .35rem; }
+    .st-key-cookie_setter { position: absolute; width: 0; height: 0; overflow: hidden; }
 
     /* Desktop table frame and mobile frame: exactly one is visible */
     .st-key-ranking_desktop { display: block; }

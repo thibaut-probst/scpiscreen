@@ -550,7 +550,15 @@ class StoreResult(Generic[_V]):
 
 
 class TTLStore(Generic[_V]):
-    """Process-wide cache: one refresh at a time, last good value kept when the source fails."""
+    """Process-wide cache with stale-while-revalidate and stale-if-error.
+
+    - Fresh data is returned at once.
+    - Once the data is older than the TTL it is STILL returned at once (not marked stale)
+      while a single background thread refreshes it; nobody waits for the source.
+    - Only the very first load blocks, and every waiting session shares that one request.
+    - If a refresh fails, the last good data keeps being served with stale=True until a
+      refresh succeeds; the source is not queried again for `retry_after` seconds.
+    """
 
     def __init__(
         self,
@@ -566,6 +574,7 @@ class TTLStore(Generic[_V]):
         self._name = name
         self._state_lock = threading.Lock()
         self._refresh_lock = threading.Lock()
+        self._refreshing = False
         self._value: _V | None = None
         self._has_value = False
         self._version = 0
@@ -573,61 +582,70 @@ class TTLStore(Generic[_V]):
         self._next_attempt = 0.0
         self._last_error = ""
 
-    def _result(self, stale: bool) -> StoreResult[_V]:
-        # Callers hold _state_lock and know _has_value is True.
-        return StoreResult(self._value, self._version, self._loaded_at, stale)  # type: ignore[arg-type]
+    def _result(self) -> StoreResult[_V]:
+        # Callers hold _state_lock and know _has_value is True. "Stale" means a refresh FAILED:
+        # data that is merely past its TTL while a refresh is running is not reported as stale.
+        return StoreResult(self._value, self._version, self._loaded_at, bool(self._last_error))  # type: ignore[arg-type]
 
-    def _fresh(self, now: float) -> bool:
-        return self._has_value and now - self._loaded_at < self._ttl
+    def _refresh(self) -> None:
+        """Load once and record the outcome. The caller holds _refresh_lock."""
+        try:
+            value = self._loader()
+        except SheetLoadError as error:
+            message = str(error)
+            logger.warning("Refresh of %r failed: %s", self._name, message)
+        except Exception:
+            logger.exception("Unexpected error while refreshing %r", self._name)
+            message = "Erreur interne lors du chargement des données."
+        else:
+            with self._state_lock:
+                self._value = value
+                self._has_value = True
+                self._version += 1
+                self._loaded_at = time.time()
+                self._next_attempt = 0.0
+                self._last_error = ""
+            return
+        with self._state_lock:
+            self._next_attempt = time.time() + self._retry_after
+            self._last_error = message
+
+    def _refresh_in_background(self) -> None:
+        try:
+            with self._refresh_lock:
+                self._refresh()
+        finally:
+            with self._state_lock:
+                self._refreshing = False
 
     def get(self) -> StoreResult[_V]:
-        """Return the cached value, refreshing it when needed.
-
-        Raises SheetLoadError only when no value has ever been loaded successfully.
-        """
+        """Return the cached value. Raises SheetLoadError only when nothing was ever loaded."""
         with self._state_lock:
             now = time.time()
-            if self._fresh(now):
-                return self._result(False)
-            if now < self._next_attempt:  # a refresh failed recently: do not hammer the source
-                if self._has_value:
-                    return self._result(True)
+            if self._has_value:
+                if now - self._loaded_at >= self._ttl and now >= self._next_attempt and not self._refreshing:
+                    self._refreshing = True
+                    threading.Thread(
+                        target=self._refresh_in_background,
+                        name=f"refresh-{self._name}",
+                        daemon=True,
+                    ).start()
+                return self._result()
+            if now < self._next_attempt:  # first load failed recently: do not hammer the source
                 raise SheetLoadError(self._last_error)
-            have_value = self._has_value
 
-        # Without any value everybody waits for the single refresh; otherwise stale data is served meanwhile.
-        if not self._refresh_lock.acquire(blocking=not have_value):
+        # Nothing loaded yet: one blocking load, shared by every waiting session.
+        with self._refresh_lock:
             with self._state_lock:
-                return self._result(True)
-        try:
-            with self._state_lock:
-                if self._fresh(time.time()):  # another thread refreshed while we waited
-                    return self._result(False)
-            try:
-                value = self._loader()
-            except SheetLoadError as error:
-                message = str(error)
-                logger.warning("Refresh of %r failed: %s", self._name, message)
-            except Exception:
-                logger.exception("Unexpected error while refreshing %r", self._name)
-                message = "Erreur interne lors du chargement des données."
-            else:
-                with self._state_lock:
-                    self._value = value
-                    self._has_value = True
-                    self._version += 1
-                    self._loaded_at = time.time()
-                    self._next_attempt = 0.0
-                    self._last_error = ""
-                    return self._result(False)
-            with self._state_lock:
-                self._next_attempt = time.time() + self._retry_after
-                self._last_error = message
                 if self._has_value:
-                    return self._result(True)
-            raise SheetLoadError(message)
-        finally:
-            self._refresh_lock.release()
+                    return self._result()
+                if time.time() < self._next_attempt:
+                    raise SheetLoadError(self._last_error)
+            self._refresh()
+            with self._state_lock:
+                if self._has_value:
+                    return self._result()
+                raise SheetLoadError(self._last_error)
 
 
 # Shared by every session. Streamlit keeps imported modules alive between reruns.
