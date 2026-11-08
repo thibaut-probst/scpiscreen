@@ -858,11 +858,13 @@ st.markdown(
         <div class="masthead-body"><div>
             <div class="masthead-title">Classement des SCPI</div>
             <div class="masthead-lede">Selon plusieurs profils d’investissement</div>
-        </div><div class="masthead-tools">
-            <span class="source-badge">{masthead_status}</span>
-        </div></div>
-    </header>
-    """,
+    """
+    #    </div><div class="masthead-tools">
+    #        <span class="source-badge">{masthead_status}</span>
+    #    </div></div>
+    #</header>
+    #"""
+    ,
     unsafe_allow_html=True,
 )
 
@@ -957,10 +959,10 @@ data_warnings = view["warnings"]
 
 if load_error:
     st.error(f"Les données du Google Sheet ne sont pas accessibles : {md_text(load_error)}")
-if stale_age_minutes is not None:
+if stale_age_minutes is not None and stale_age_minutes > (24 * 60):
     st.warning(
         f"La source Google Sheets est momentanément inaccessible : les données affichées "
-        f"datent d’environ {stale_age_minutes} minute(s)."
+        f"datent d’environ {round(stale_age_minutes / 60)} heure(s)."
     )
 for message in data_warnings[:MAX_WARNINGS_DISPLAYED]:
     st.warning(md_text(message))
