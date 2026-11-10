@@ -522,7 +522,7 @@ def validate_missing_criteria(
                     share,
                     max((value for _, value in impacts), default=0.0),
                     criterion["name"],
-                    f"Donnée manquante : le critère « {criterion['name']} » n'est pas disponible pour "
+                    f"Attention : le critère « {criterion['name']} » n'est pas disponible pour "
                     f"{missing} SCPI sur {len(rows)} ({share * 100:.0f} %). "
                     f"Poids dans le scoring : {impact_text}. "
                     "Les notes qui en dépendent peuvent être faussées.",
@@ -547,7 +547,7 @@ def validate_missing_criteria(
                     share,
                     0.0,
                     column,
-                    f"Donnée manquante : la colonne « {column} » de l’onglet « {tab_name} » n'est pas disponible "
+                    f"Attention : la donnée « {column} » n'est pas disponible "
                     f"pour {missing} SCPI sur {len(rows)} ({share * 100:.0f} %). "
                     "Le calcul des scores qui l'utilisent peuvent être faussés.",
                 ))
