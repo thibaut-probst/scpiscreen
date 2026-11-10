@@ -29,6 +29,7 @@ from scpi_data import (
     build_rankings,
     build_weight_matrix,
     validate_join,
+    validate_missing_criteria,
     validate_scores,
 )
 
@@ -826,6 +827,27 @@ def build_profile_view(version: int, profile: str, _data: dict[str, list[dict[st
     }
 
 
+@st.cache_data(ttl=SHEET_CACHE_TTL_SECONDS, max_entries=4, show_spinner=False)
+def build_criteria_warnings(
+    data_version: int,
+    weights_version: int,
+    _data: dict[str, list[dict[str, str]]],
+    _weight_rows: list[list[str]],
+) -> list[str]:
+    """Warnings about columns that are almost entirely "NA".
+
+    `data_version` and `weights_version` are the cache key; the underscore arguments are not hashed.
+    Without usable weights, the weighted-criteria layer is skipped but every column is still checked.
+    """
+    matrix: dict[str, Any] = {"profiles": [], "criteria": []}
+    if _weight_rows:
+        try:
+            matrix = build_weight_matrix(_weight_rows)
+        except SheetLoadError:
+            logger.warning("Weights tab unusable: the missing-data check ignores the weights")
+    return validate_missing_criteria(_data, matrix)
+
+
 # ---- Access gate --------------------------------------------------------------
 # Everything below this line is only reached by a visitor who passed the gate.
 
@@ -955,15 +977,31 @@ if not load_error:
         logger.exception("Unexpected error while building the rankings")
         load_error = "Erreur interne lors de la préparation des données."
 
-data_warnings = view["warnings"]
+criteria_warnings: list[str] = []
+if not load_error:
+    weights_version, weight_rows = 0, []
+    try:
+        weights_result = WEIGHTS_STORE.get()
+        weights_version, weight_rows = weights_result.version, weights_result.value
+    except SheetLoadError:
+        pass  # An unreachable weights tab is reported by the method page; the check goes on without it.
+    except Exception:
+        logger.exception("Unexpected error while loading the weights for the missing-data check")
+    try:
+        criteria_warnings = build_criteria_warnings(data_version, weights_version, data, weight_rows)
+    except Exception:
+        logger.exception("Unexpected error while checking the data for missing values")
+
+# Missing-data warnings come first: they can distort the scores themselves.
+data_warnings = [*criteria_warnings, *view["warnings"]]
 
 if load_error:
     st.error(f"Les données du Google Sheet ne sont pas accessibles : {md_text(load_error)}")
-if stale_age_minutes is not None and stale_age_minutes > (24 * 60):
-    st.warning(
-        f"La source Google Sheets est momentanément inaccessible : les données affichées "
-        f"datent d’environ {round(stale_age_minutes / 60)} heure(s)."
-    )
+#if stale_age_minutes is not None and stale_age_minutes > (24 * 60):
+#    st.warning(
+#        f"La source Google Sheets est momentanément inaccessible : les données affichées "
+#        f"datent d’environ {round(stale_age_minutes / 60)} heure(s)."
+#    )
 for message in data_warnings[:MAX_WARNINGS_DISPLAYED]:
     st.warning(md_text(message))
 if len(data_warnings) > MAX_WARNINGS_DISPLAYED:

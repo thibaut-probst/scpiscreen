@@ -69,6 +69,23 @@ WEIGHT_MAX = 100.0
 SHEET_CACHE_TTL_SECONDS = 900
 SHEET_RETRY_AFTER_SECONDS = 60
 
+# Missing-data check. A column that is "NA" for almost every SCPI silently skews the scores
+# or leaves the table empty, so a warning is shown above the ranking. Two layers:
+#   1. every criterion of the weights tab (blank cells count as missing, and the warning
+#      reports the weight of the criterion in each profile);
+#   2. every other column of the checked tabs (only explicit "NA" cells count, so that
+#      optional columns that are simply left blank do not raise a warning).
+MISSING_CRITERION_THRESHOLD = 0.5  # flagged when strictly more than 90 % of the rows are missing
+MAX_MISSING_CRITERIA_DISPLAYED = 10
+# Tabs checked, in order. A criterion is looked up in the first tab that has its column.
+CRITERIA_TABS = ("scores", "data")
+# Cell contents (normalized by _text_key) that mean "no value".
+MISSING_TOKENS = frozenset(
+    {"", "na", "n/a", "n.a.", "nd", "n.d.", "#n/a", "#div/0!", "#value!", "#valeur!",
+     "nan", "null", "none", "-", "–", "—"}
+)
+EXPLICIT_MISSING_TOKENS = MISSING_TOKENS - {""}
+
 
 class SheetLoadError(RuntimeError):
     """Raised when a configured worksheet cannot be loaded. The message is safe to display."""
@@ -416,6 +433,135 @@ def validate_join(data: dict[str, list[dict[str, str]]]) -> list[str]:
     return messages
 
 
+def _is_missing_cell(value: Any) -> bool:
+    """True when a cell is empty or holds an "NA"-like token (case and accents ignored)."""
+    return _text_key(value or "") in MISSING_TOKENS
+
+
+def _scpi_rows(data: dict[str, list[dict[str, str]]], tab: str) -> list[dict[str, str]]:
+    """Rows of a tab that belong to a SCPI (blank spreadsheet rows are not counted)."""
+    rows = data.get(tab, [])
+    if tab == "scores":
+        return [row for row in rows if row.get("Catégorie SCPI", "").strip()]
+    name_column = resolve_name_column(data)
+    return [row for row in rows if _row_name(row, name_column)]
+
+
+def _find_criterion_column(rows: list[dict[str, str]], category: str, criterion: str) -> str | None:
+    """Header of the column that holds a criterion, tolerant to case, accents and spacing.
+
+    Both "Criterion" and the merged "Category Criterion" label are accepted.
+    """
+    if not rows:
+        return None
+    wanted = {_text_key(criterion)}
+    if category and category != UNCATEGORIZED_LABEL:
+        wanted.add(_text_key(f"{category} {criterion}"))
+    for header in rows[0]:
+        if _text_key(header) in wanted:
+            return header
+    return None
+
+
+def _excluded_columns(data: dict[str, list[dict[str, str]]], tab: str) -> set[str]:
+    """Columns that are never checked for "NA": names/labels and the final scores."""
+    if tab == "scores":
+        return {"Catégorie SCPI", *SCORE_COLUMNS}  # the final scores are checked by validate_scores
+    return {"SCPI", resolve_name_column(data)}
+
+
+def validate_missing_criteria(
+    data: dict[str, list[dict[str, str]]],
+    matrix: dict[str, Any],
+    threshold: float = MISSING_CRITERION_THRESHOLD,
+) -> list[str]:
+    """Warn when a column is "NA" for more than `threshold` of the SCPI rows.
+
+    `matrix` is the result of build_weight_matrix() (pass {"profiles": [], "criteria": []}
+    when the weights tab is unavailable: the second layer still works). Two layers:
+      1. the weighted criteria, found by their header in CRITERIA_TABS; the warning gives their
+         weight in each profile. Criteria without any weight cannot change a score and are skipped;
+      2. every other column of those tabs, counting only explicit "NA" cells.
+    """
+    profiles: list[str] = matrix.get("profiles", [])
+    criteria: list[dict[str, Any]] = matrix.get("criteria", [])
+    totals = {
+        profile: sum(criterion["weights"].get(profile, 0.0) for criterion in criteria)
+        for profile in profiles
+    }
+    rows_by_tab = {tab: _scpi_rows(data, tab) for tab in CRITERIA_TABS}
+
+    # (share, top weight impact, sort label, message)
+    findings: list[tuple[float, float, str, str]] = []
+    checked: set[tuple[str, str]] = set()  # (tab, column) already handled by layer 1
+
+    # Layer 1: weighted criteria.
+    for criterion in criteria:
+        weights = criterion["weights"]
+        weighted = any(weights.get(profile, 0.0) > 0 for profile in profiles)
+        evaluated = False
+        for tab in CRITERIA_TABS:
+            rows = rows_by_tab[tab]
+            column = _find_criterion_column(rows, criterion["category"], criterion["name"])
+            if column is None:
+                continue
+            #checked.add((tab, column))  # also keeps layer 2 from reporting it again
+            if evaluated or not weighted:
+                continue
+            evaluated = True  # only the first tab that has the column is evaluated
+            missing = sum(1 for row in rows if _is_missing_cell(row.get(column)))
+            share = missing / len(rows)
+            if share > threshold:
+                impacts = [
+                    (profile, weights[profile] / totals[profile] * 100)
+                    for profile in profiles
+                    if weights.get(profile, 0.0) > 0 and totals[profile] > 0
+                ]
+                impact_text = ", ".join(f"{profile} {value:.0f} %" for profile, value in impacts)
+                findings.append((
+                    share,
+                    max((value for _, value in impacts), default=0.0),
+                    criterion["name"],
+                    f"Donnée manquante : le critère « {criterion['name']} » n'est pas disponible pour "
+                    f"{missing} SCPI sur {len(rows)} ({share * 100:.0f} %). "
+                    f"Poids dans le scoring : {impact_text}. "
+                    "Les notes qui en dépendent peuvent être faussées.",
+                ))
+
+    # Layer 2: every other column (explicit "NA" cells only).
+    for tab in CRITERIA_TABS:
+        rows = rows_by_tab[tab]
+        if not rows:
+            continue
+        excluded = _excluded_columns(data, tab)
+        for column in rows[0]:
+            if column in excluded or (tab, column) in checked:
+                continue
+            missing = sum(
+                1 for row in rows if _text_key(row.get(column) or "") in EXPLICIT_MISSING_TOKENS
+            )
+            share = missing / len(rows)
+            if share > threshold:
+                tab_name = WORKSHEETS.get(tab, tab)
+                findings.append((
+                    share,
+                    0.0,
+                    column,
+                    f"Donnée manquante : la colonne « {column} » de l’onglet « {tab_name} » n'est pas disponible "
+                    f"pour {missing} SCPI sur {len(rows)} ({share * 100:.0f} %). "
+                    "Le calcul des scores qui l'utilisent peuvent être faussés.",
+                ))
+
+    findings.sort(key=lambda finding: (-finding[0], -finding[1], finding[2]))
+    messages = [finding[3] for finding in findings[:MAX_MISSING_CRITERIA_DISPLAYED]]
+    hidden = len(findings) - MAX_MISSING_CRITERIA_DISPLAYED
+    if hidden > 0:
+        messages.append(
+            f"{hidden} autre(s) colonne(s) sont aussi en NA pour plus de {threshold * 100:.0f} % des SCPI."
+        )
+    return messages
+
+
 _LIGATURES = str.maketrans({"œ": "oe", "Œ": "OE", "æ": "ae", "Æ": "AE", "’": "'", "‘": "'", "ʼ": "'"})
 
 
@@ -550,15 +696,7 @@ class StoreResult(Generic[_V]):
 
 
 class TTLStore(Generic[_V]):
-    """Process-wide cache with stale-while-revalidate and stale-if-error.
-
-    - Fresh data is returned at once.
-    - Once the data is older than the TTL it is STILL returned at once (not marked stale)
-      while a single background thread refreshes it; nobody waits for the source.
-    - Only the very first load blocks, and every waiting session shares that one request.
-    - If a refresh fails, the last good data keeps being served with stale=True until a
-      refresh succeeds; the source is not queried again for `retry_after` seconds.
-    """
+    """Process-wide cache: one refresh at a time, last good value kept when the source fails."""
 
     def __init__(
         self,
@@ -574,7 +712,6 @@ class TTLStore(Generic[_V]):
         self._name = name
         self._state_lock = threading.Lock()
         self._refresh_lock = threading.Lock()
-        self._refreshing = False
         self._value: _V | None = None
         self._has_value = False
         self._version = 0
@@ -582,70 +719,61 @@ class TTLStore(Generic[_V]):
         self._next_attempt = 0.0
         self._last_error = ""
 
-    def _result(self) -> StoreResult[_V]:
-        # Callers hold _state_lock and know _has_value is True. "Stale" means a refresh FAILED:
-        # data that is merely past its TTL while a refresh is running is not reported as stale.
-        return StoreResult(self._value, self._version, self._loaded_at, bool(self._last_error))  # type: ignore[arg-type]
+    def _result(self, stale: bool) -> StoreResult[_V]:
+        # Callers hold _state_lock and know _has_value is True.
+        return StoreResult(self._value, self._version, self._loaded_at, stale)  # type: ignore[arg-type]
 
-    def _refresh(self) -> None:
-        """Load once and record the outcome. The caller holds _refresh_lock."""
-        try:
-            value = self._loader()
-        except SheetLoadError as error:
-            message = str(error)
-            logger.warning("Refresh of %r failed: %s", self._name, message)
-        except Exception:
-            logger.exception("Unexpected error while refreshing %r", self._name)
-            message = "Erreur interne lors du chargement des données."
-        else:
-            with self._state_lock:
-                self._value = value
-                self._has_value = True
-                self._version += 1
-                self._loaded_at = time.time()
-                self._next_attempt = 0.0
-                self._last_error = ""
-            return
-        with self._state_lock:
-            self._next_attempt = time.time() + self._retry_after
-            self._last_error = message
-
-    def _refresh_in_background(self) -> None:
-        try:
-            with self._refresh_lock:
-                self._refresh()
-        finally:
-            with self._state_lock:
-                self._refreshing = False
+    def _fresh(self, now: float) -> bool:
+        return self._has_value and now - self._loaded_at < self._ttl
 
     def get(self) -> StoreResult[_V]:
-        """Return the cached value. Raises SheetLoadError only when nothing was ever loaded."""
+        """Return the cached value, refreshing it when needed.
+
+        Raises SheetLoadError only when no value has ever been loaded successfully.
+        """
         with self._state_lock:
             now = time.time()
-            if self._has_value:
-                if now - self._loaded_at >= self._ttl and now >= self._next_attempt and not self._refreshing:
-                    self._refreshing = True
-                    threading.Thread(
-                        target=self._refresh_in_background,
-                        name=f"refresh-{self._name}",
-                        daemon=True,
-                    ).start()
-                return self._result()
-            if now < self._next_attempt:  # first load failed recently: do not hammer the source
+            if self._fresh(now):
+                return self._result(False)
+            if now < self._next_attempt:  # a refresh failed recently: do not hammer the source
+                if self._has_value:
+                    return self._result(True)
                 raise SheetLoadError(self._last_error)
+            have_value = self._has_value
 
-        # Nothing loaded yet: one blocking load, shared by every waiting session.
-        with self._refresh_lock:
+        # Without any value everybody waits for the single refresh; otherwise stale data is served meanwhile.
+        if not self._refresh_lock.acquire(blocking=not have_value):
             with self._state_lock:
-                if self._has_value:
-                    return self._result()
-                if time.time() < self._next_attempt:
-                    raise SheetLoadError(self._last_error)
-            self._refresh()
+                return self._result(True)
+        try:
             with self._state_lock:
+                if self._fresh(time.time()):  # another thread refreshed while we waited
+                    return self._result(False)
+            try:
+                value = self._loader()
+            except SheetLoadError as error:
+                message = str(error)
+                logger.warning("Refresh of %r failed: %s", self._name, message)
+            except Exception:
+                logger.exception("Unexpected error while refreshing %r", self._name)
+                message = "Erreur interne lors du chargement des données."
+            else:
+                with self._state_lock:
+                    self._value = value
+                    self._has_value = True
+                    self._version += 1
+                    self._loaded_at = time.time()
+                    self._next_attempt = 0.0
+                    self._last_error = ""
+                    return self._result(False)
+            with self._state_lock:
+                self._next_attempt = time.time() + self._retry_after
+                self._last_error = message
                 if self._has_value:
-                    return self._result()
-                raise SheetLoadError(self._last_error)
+                    return self._result(True)
+            raise SheetLoadError(message)
+        finally:
+            self._refresh_lock.release()
 
 
 # Shared by every session. Streamlit keeps imported modules alive between reruns.
