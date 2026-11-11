@@ -549,7 +549,7 @@ def validate_missing_criteria(
                     column,
                     f"Attention : la donnée « {column} » n'est pas disponible "
                     f"pour {missing} SCPI sur {len(rows)} ({share * 100:.0f} %). "
-                    "Le calcul des scores qui l'utilisent peuvent être faussés.",
+                    "Le calcul des scores qui l'utilisent peut être faussé.",
                 ))
 
     findings.sort(key=lambda finding: (-finding[0], -finding[1], finding[2]))
