@@ -1,23 +1,14 @@
 import base64
 import hashlib
 import html
-import inspect
 import logging
-import math
 import re
-import time
 from typing import Any
 
 import streamlit as st
-import streamlit.components.v1 as components
-
-try:
-    from st_keyup import st_keyup
-    HAS_KEYUP = True
-except ImportError:
-    HAS_KEYUP = False
 
 from access_gate import require_access
+from html_frame import render_html_frame
 from method_page import build_method_page_html
 from scpi_data import (
     CATEGORY_ORDER,
@@ -28,6 +19,9 @@ from scpi_data import (
     SheetLoadError,
     build_rankings,
     build_weight_matrix,
+    is_missing_value,
+    parse_number,
+    text_key,
     validate_join,
     validate_missing_criteria,
     validate_scores,
@@ -105,8 +99,6 @@ st.markdown(
     .masthead-kicker { margin-bottom: .5rem; color: var(--ice); font-size: .68rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
     .masthead-title { max-width: 780px; color: #fff; font-family: 'Fraunces', Georgia, serif; font-size: clamp(2rem, 4vw, 3.15rem); letter-spacing: -.04em; font-weight: 500; line-height: 1.12; }
     .masthead-lede { max-width: 42rem; margin-top: .6rem; color: #c4d4e2; font-size: .98rem; line-height: 1.5; }
-    .masthead-tools { display: flex; align-items: center; gap: .55rem; flex: 0 0 auto; }
-    .source-badge { flex: 0 0 auto; padding: .58rem .78rem; border: 1px solid rgba(210,231,246,.22); border-radius: 999px; color: #deebf5; background: rgba(255,255,255,.06); font-size: .62rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 
     /* Controls */
     .profile-label { margin: .15rem 0 .55rem; color: var(--muted); font-size: .65rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
@@ -131,19 +123,8 @@ st.markdown(
     html[data-theme="dark"] [data-testid="stButton"] button { border-color: #3a5a63; color: #9de0cf; }
     html[data-theme="dark"] [data-testid="stButton"] button:hover { background: #214541; }
 
-    /* Search field with an inline clear button */
-    .st-key-search_box { position: relative; }
-    .st-key-search_box input { padding-right: 2.6rem; }
-    .st-key-search_clear { position: absolute; top: 50%; right: .45rem; z-index: 5; width: auto; transform: translateY(-50%); }
-    .st-key-search_clear [data-testid="stButton"] button { min-height: 1.9rem !important; min-width: 1.9rem; padding: 0 .5rem; border: 0 !important; border-radius: 8px; color: var(--muted) !important; background: transparent !important; font-size: .85rem; line-height: 1; transform: none; }
-    .st-key-search_clear [data-testid="stButton"] button:hover, .st-key-search_clear [data-testid="stButton"] button:focus-visible { color: var(--ink) !important; background: var(--blue-pale) !important; transform: none; }
     .st-key-page_navigation { margin-bottom: .35rem; }
     .st-key-cookie_setter { position: absolute; width: 0; height: 0; overflow: hidden; }
-
-    /* Desktop table frame and mobile frame: exactly one is visible */
-    .st-key-ranking_desktop { display: block; }
-    .st-key-ranking_mobile { display: none; }
-    .st-key-mobile_view_toolbar { display: none !important; }
 
     /* Method page */
     .method-intro { max-width: 52rem; margin: .2rem 0 1.2rem; color: var(--muted); font-size: .98rem; line-height: 1.6; }
@@ -183,17 +164,11 @@ st.markdown(
     }
 
     @media (max-width: 760px) {
-        .st-key-ranking_desktop { display: none !important; }
-        .st-key-ranking_mobile { display: block !important; }
-        .st-key-mobile_view_toolbar { display: flex !important; }
-
         [data-testid="stMainBlockContainer"] { padding: .85rem .85rem 2.5rem; }
         .masthead { margin-bottom: 1.25rem; padding: 1.2rem 1.1rem 1.3rem; border-radius: 18px; }
         .masthead-body { flex-direction: column; gap: 1rem; margin-top: 1.35rem; align-items: flex-start; }
         .masthead-title { font-size: clamp(1.8rem, 8vw, 2.35rem); }
         .masthead-lede { font-size: .88rem; }
-        .masthead-tools { flex-wrap: wrap; }
-        .source-badge { display: none; }
         [data-testid="stSegmentedControl"] button { min-height: 2.8rem; font-size: .76rem !important; }
         .section-heading { margin-top: 1.3rem; margin-bottom: 0.5rem; }
 
@@ -268,7 +243,21 @@ __DARK_BLOCK__
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: transparent; color: var(--ink); font-family: 'DM Sans', sans-serif; }
 [hidden] { display: none !important; }
+/* flow-root keeps the margins of the children inside, so the measured height is the real one. */
+.app { display: flow-root; padding-bottom: 8px; }
 .app.show-detail .list { display: none; }
+
+/* Toolbar: search field (and the cards / table switch on narrow screens) */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .7rem; margin: 0 0 .9rem; }
+.search-field { position: relative; flex: 1 1 16rem; max-width: 26rem; }
+#search { width: 100%; min-height: 2.75rem; padding: .5rem 2.5rem .5rem .85rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-family: inherit; font-size: .9rem; -webkit-appearance: none; appearance: none; }
+#search::-webkit-search-cancel-button { display: none; }
+#search:focus-visible, .view-toggle button:focus-visible, .ranking-table th:focus-visible, .company-link:focus-visible, .back:focus-visible, #mobile-sort:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+#search-clear { position: absolute; top: 50%; right: .35rem; min-width: 1.9rem; min-height: 1.9rem; padding: 0 .5rem; transform: translateY(-50%); border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: .85rem; line-height: 1; cursor: pointer; }
+#search-clear:hover, #search-clear:focus-visible { color: var(--ink); background: var(--blue-pale); }
+.view-toggle { display: none; gap: .3rem; padding: .25rem; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); }
+.view-toggle button { min-height: 2.3rem; padding: .3rem .95rem; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-family: inherit; font-size: .8rem; font-weight: 650; cursor: pointer; }
+.view-toggle button[aria-pressed="true"] { color: var(--blue); background: var(--blue-pale); }
 
 /* Table */
 .scroll { width: 100%; overflow: auto; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow); }
@@ -305,6 +294,7 @@ html, body { margin: 0; padding: 0; background: transparent; color: var(--ink); 
 #mobile-sort { flex: 1; padding: .35rem .5rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-family: inherit; font-size: .85rem; }
 
 /* Fiche SCPI */
+.detail { scroll-margin-top: 4.5rem; }
 .back { min-height: 2.75rem; margin: 0 0 1rem; padding: .6rem 1rem; border: 1px solid #c8dcda; border-radius: 10px; background: var(--surface); color: var(--blue); font-family: inherit; font-size: .9rem; font-weight: 650; cursor: pointer; }
 .back:hover { background: var(--blue-pale); }
 .scpi-card { margin: .2rem 0 1rem; padding: clamp(1.2rem, 3vw, 2rem); border: 1px solid var(--line); border-radius: 20px; background: var(--surface); box-shadow: var(--shadow); }
@@ -321,6 +311,10 @@ html, body { margin: 0; padding: 0; background: transparent; color: var(--ink); 
 .fact-value { margin-top: .25rem; color: var(--ink); font-size: .9rem; font-weight: 600; line-height: 1.45; }
 
 @media (max-width: 760px) {
+    .toolbar { flex-direction: column; align-items: stretch; }
+    .search-field { flex: 0 0 auto; max-width: none; }
+    .view-toggle { display: flex; }
+    .view-toggle button { flex: 1; }
     .view-cards .mobile-sort { display: flex; }
     .view-table .ranking-table th, .view-table .ranking-table td { padding: .75rem .8rem; }
     .view-table .ranking-table td.cell-scpi { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line); }
@@ -365,24 +359,60 @@ FRAME_JS = """
     var app = document.querySelector('.app');
     var table = document.getElementById('ranking');
     var select = document.getElementById('mobile-sort');
+    var search = document.getElementById('search');
+    var clearButton = document.getElementById('search-clear');
+    var emptyRow = document.getElementById('empty-row');
     var headers = table ? Array.prototype.slice.call(table.querySelectorAll('th.sort-btn')) : [];
+    var viewButtons = Array.prototype.slice.call(document.querySelectorAll('[data-view]'));
+    var lastOpener = null;
 
-    function toNumber(text) {
-        var number = parseFloat(text);
-        return isNaN(number) ? -Infinity : number;
+    // The frame is as tall as its content: no inner scrollbar, no empty space. The frame has the
+    // same origin as the page, so it can resize its own <iframe>. Streamlit fixes the height of the
+    // containers around the iframe from the initial height: they must follow too, otherwise the
+    // content overflows onto the elements below. If resizing is not allowed, the initial height
+    // given by the server is kept.
+    function fitHeight() {
+        try {
+            var frame = window.frameElement;
+            if (!frame || !app) { return; }
+            var height = Math.ceil(app.getBoundingClientRect().height) + 'px';
+            var limit = frame.closest('[data-testid="stElementContainer"], .element-container, .stElementContainer');
+            var node = frame;
+            while (node) {
+                node.style.height = height;
+                if (node === limit || !limit) { break; }
+                node = node.parentElement;
+            }
+        } catch (error) { /* keep the initial height */ }
     }
 
+    function scrollTo(element, block) {
+        try { element.scrollIntoView({ block: block }); } catch (error) { /* ignore */ }
+    }
+
+    function normalize(text) {
+        return String(text).normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase()
+            .replace(/\\u0153/g, 'oe').replace(/\\u00e6/g, 'ae').replace(/[\\u2018\\u2019\\u02bc]/g, "'")
+            .replace(/\\s+/g, ' ').trim();
+    }
+
+    // Missing values (empty data-sort) always go last, whatever the direction.
     function sortRows(column, type, direction) {
         if (!table) { return; }
         var tbody = table.tBodies[0];
-        var rows = Array.prototype.slice.call(tbody.rows);
+        var rows = Array.prototype.slice.call(tbody.rows).filter(function (row) { return row !== emptyRow; });
         rows.sort(function (a, b) {
-            var left = a.cells[column].getAttribute('data-sort');
-            var right = b.cells[column].getAttribute('data-sort');
+            var left = a.cells[column].getAttribute('data-sort') || '';
+            var right = b.cells[column].getAttribute('data-sort') || '';
             var result;
             if (type === 'num') {
-                var leftNumber = toNumber(left);
-                var rightNumber = toNumber(right);
+                var leftNumber = parseFloat(left);
+                var rightNumber = parseFloat(right);
+                var leftMissing = isNaN(leftNumber);
+                var rightMissing = isNaN(rightNumber);
+                if (leftMissing || rightMissing) {
+                    return leftMissing && rightMissing ? 0 : (leftMissing ? 1 : -1);
+                }
                 result = leftNumber === rightNumber ? 0 : (leftNumber < rightNumber ? -1 : 1);
             } else {
                 result = left.localeCompare(right, 'fr');
@@ -390,22 +420,29 @@ FRAME_JS = """
             return direction === 'asc' ? result : -result;
         });
         rows.forEach(function (row) { tbody.appendChild(row); });
+        if (emptyRow) { tbody.appendChild(emptyRow); }
     }
 
     headers.forEach(function (th, index) {
-        th.addEventListener('click', function () {
+        function activate() {
             var direction = th.getAttribute('data-dir') === 'asc' ? 'desc' : 'asc';
             headers.forEach(function (header) {
                 header.setAttribute('data-dir', 'none');
+                header.setAttribute('aria-sort', 'none');
                 var icon = header.querySelector('.icon');
-                icon.textContent = '↕';
+                icon.textContent = '\\u2195';
                 icon.style.opacity = '0.3';
             });
             th.setAttribute('data-dir', direction);
+            th.setAttribute('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
             var activeIcon = th.querySelector('.icon');
-            activeIcon.textContent = direction === 'asc' ? '↑' : '↓';
+            activeIcon.textContent = direction === 'asc' ? '\\u2191' : '\\u2193';
             activeIcon.style.opacity = '1';
             sortRows(index, th.getAttribute('data-type'), direction);
+        }
+        th.addEventListener('click', activate);
+        th.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); }
         });
     });
 
@@ -416,12 +453,51 @@ FRAME_JS = """
         });
     }
 
-    function showDetail(id) {
+    // Search: filters the rows in the browser (accents and case ignored). No server round trip,
+    // and the current sort order is kept.
+    function applyFilter() {
+        if (!table) { return; }
+        var query = search ? normalize(search.value) : '';
+        var visible = 0;
+        Array.prototype.forEach.call(table.tBodies[0].rows, function (row) {
+            if (row === emptyRow) { return; }
+            var match = !query || (row.getAttribute('data-name') || '').indexOf(query) !== -1;
+            row.hidden = !match;
+            if (match) { visible += 1; }
+        });
+        if (emptyRow) { emptyRow.hidden = visible !== 0; }
+        if (clearButton) { clearButton.hidden = !(search && search.value); }
+        fitHeight();
+    }
+    if (search) { search.addEventListener('input', applyFilter); }
+    if (clearButton) {
+        clearButton.addEventListener('click', function () {
+            search.value = '';
+            applyFilter();
+            search.focus();
+        });
+    }
+
+    viewButtons.forEach(function (button) {
+        button.addEventListener('click', function () {
+            var view = button.getAttribute('data-view');
+            app.classList.toggle('view-cards', view === 'cards');
+            app.classList.toggle('view-table', view === 'table');
+            viewButtons.forEach(function (other) {
+                other.setAttribute('aria-pressed', other === button ? 'true' : 'false');
+            });
+            fitHeight();
+        });
+    });
+
+    function showDetail(id, scroll) {
         Array.prototype.forEach.call(document.querySelectorAll('.detail'), function (detail) {
             detail.hidden = detail.getAttribute('data-id') !== id;
         });
         app.classList.add('show-detail');
-        window.scrollTo(0, 0);
+        fitHeight();
+        var shown = document.querySelector('.detail:not([hidden])');
+        if (shown && scroll) { scrollTo(shown, 'start'); }
     }
 
     function showList() {
@@ -429,13 +505,16 @@ FRAME_JS = """
             detail.hidden = true;
         });
         app.classList.remove('show-detail');
+        fitHeight();
+        if (lastOpener) { scrollTo(lastOpener, 'center'); }
     }
 
     document.addEventListener('click', function (event) {
         var opener = event.target.closest('[data-open]');
         if (opener) {
             event.preventDefault();
-            showDetail(opener.getAttribute('data-open'));
+            lastOpener = opener;
+            showDetail(opener.getAttribute('data-open'), true);
             return;
         }
         if (event.target.closest('[data-back]')) {
@@ -443,10 +522,12 @@ FRAME_JS = """
         }
     });
 
+    if (window.ResizeObserver && app) { new ResizeObserver(fitHeight).observe(app); }
+    window.addEventListener('load', fitHeight);
+
     var initial = app.getAttribute('data-initial');
-    if (initial) {
-        showDetail(initial);
-    }
+    if (initial) { showDetail(initial, false); }
+    fitHeight();
 })();
 """
 
@@ -476,9 +557,8 @@ PAGE_METHOD = "Méthode de classement"
 PAGE_OPTIONS = [PAGE_RANKING, PAGE_METHOD]
 PAGE_QUERY_METHOD = "methode"
 
-MOBILE_VIEW_CARDS = "Cartes"
-MOBILE_VIEW_TABLE = "Tableau"
-MOBILE_VIEW_OPTIONS = [MOBILE_VIEW_CARDS, MOBILE_VIEW_TABLE]
+VIEW_CARDS_LABEL = "Cartes"
+VIEW_TABLE_LABEL = "Tableau"
 
 # (key, header label, sort type). Column order matches the mobile sort select below.
 TABLE_HEADERS = (
@@ -504,14 +584,9 @@ MOBILE_SORT_CHOICES = (
     ("TRI Max Nue Propriété", 8, "desc"),
 )
 
-# Frame heights are estimates: rows are not measured, so a frame may show a little
-# extra space or an inner scrollbar.
-DESKTOP_ROW_PX = 66
-TABLE_HEADER_PX = 64
-MOBILE_CARD_PX = 124
-MOBILE_TABLE_ROW_PX = 62
-DESKTOP_DETAIL_PX = 840
-MOBILE_DETAIL_PX = 1150
+# Initial height of the ranking frame (pixels). The frame then resizes itself to its content;
+# this value is only used for the first paint, or when the browser forbids the resize.
+FRAME_INITIAL_HEIGHT_PX = 900
 
 
 # ---- Helpers ------------------------------------------------------------------
@@ -528,23 +603,22 @@ def md_text(value: str) -> str:
 
 
 def display_percent(value: str) -> str:
-    value = str(value).strip()
-    if not value:
+    """A percentage as shown in the table; empty and "NA"-like values become a dash."""
+    text = str(value).strip()
+    if is_missing_value(text):
         return "—"
-    value = value.replace("%", "").strip()
-    return f"{value}%" if value else "—"
+    text = text.replace("%", "").strip()
+    return f"{text}%" if text else "—"
 
 
-def safe_float(val: Any) -> float:
-    """Sort key for a sheet cell: unusable or non-finite values sort first (-9999)."""
-    try:
-        if val is None:
-            return -9999.0
-        text = str(val).replace("%", "").replace("ans", "").replace(" ", "").strip().replace(",", ".")
-        number = float(text) if text else -9999.0
-    except ValueError:
-        return -9999.0
-    return number if math.isfinite(number) else -9999.0
+def safe_float(value: Any) -> float | None:
+    """Sort value of a sheet cell; None when the cell has no usable number."""
+    return parse_number(value)
+
+
+def format_score(score: float) -> str:
+    """Score with a decimal comma, as everywhere else in the French interface."""
+    return f"{score:.1f}".replace(".", ",")
 
 
 def category_class(score: float) -> str:
@@ -559,8 +633,8 @@ def category_class(score: float) -> str:
 
 def fact_fields(item: dict[str, Any]) -> list[tuple[str, str]]:
     percent_fields = {
-        "Bonus Louve", "TRI Max Démembrement", "Taux de liquidité", "Taux d'endettement",
-        "Décote", "Part de secteur majoritaire", "Part de logements hors de  France",
+        "Bonus Louve", "TRI Max Nue-Propriété", "Taux de liquidité", "Taux d'endettement",
+        "Décote", "Part de secteur majoritaire", "Part de logements hors de France",
         "Part de région majoritaire", "TOF", "TOP", "TOF-TOP", "Frais d'entrée",
         "Frais de gestion", "PGA", "TRI", "Revalorisation annuelle moyenne historique",
         "Revalorisation annuelle moyenne récente",
@@ -568,16 +642,20 @@ def fact_fields(item: dict[str, Any]) -> list[tuple[str, str]]:
 
     def format_value(label: str, value: Any) -> str:
         value = str(value or "").strip()
-        if not value: return "—"
-        if label in percent_fields and not value.endswith("%"): value = f"{value}%"
-        if label == "WALB" and not value.lower().endswith("ans"): return f"{value} ans"
-        if label == "Capitalisation (€)" and not value.lower().endswith("millions"): return f"{value} millions"
+        if is_missing_value(value):
+            return "—"
+        if label in percent_fields and not value.endswith("%"):
+            value = f"{value}%"
+        if label in ("WALB", "Durée TRI Max Nue-Propriété") and not value.lower().endswith("ans"):
+            return f"{value} ans"
+        if label == "Capitalisation (€)" and not value.lower().endswith("millions"):
+            return f"{value} millions"
         return value
 
     rows = [
         ("Bonus Louve", item.get("bonus_louve", "")),
-        ("TRI Max Démembrement", item.get("tri_demembrement", "")),
-        ("Durée TRI Max Démembrement", item.get("duree_tri_demembrement", "")),
+        ("TRI Max Nue-Propriété", item.get("tri_demembrement", "")),
+        ("Durée TRI Max Nue-Propriété", item.get("duree_tri_demembrement", "")),
         ("Souscriptions", item.get("souscriptions", "")),
         ("Retraits", item.get("retraits", "")),
         ("Taux de liquidité", item.get("liquidity_rate", "")),
@@ -587,7 +665,7 @@ def fact_fields(item: dict[str, Any]) -> list[tuple[str, str]]:
         ("Décote", item.get("discount", "")),
         ("Secteurs majoritaires", item.get("main_sectors", "")),
         ("Part de secteur majoritaire", item.get("part_de_secteur_majoritaire", "")),
-        ("Part de logements hors de  France", item.get("part_logements_hors_france", "")),
+        ("Part de logements hors de France", item.get("part_logements_hors_france", "")),
         ("Part de région majoritaire", item.get("part_de_region_majoritaire", "")),
         ("Régions majoritaires", item.get("main_regions", "")),
         ("TOF", item.get("tof", "")),
@@ -609,9 +687,14 @@ def fact_fields(item: dict[str, Any]) -> list[tuple[str, str]]:
 
 # ---- Ranking frame builders ---------------------------------------------------
 
-def cell_badge(label: str, text: str, sort_value: float, extra_class: str = "") -> str:
+def _sort_attribute(sort_value: float | None) -> str:
+    """Content of data-sort: empty for a missing value, which the frame always sorts last."""
+    return "" if sort_value is None else str(sort_value)
+
+
+def cell_badge(label: str, text: str, sort_value: float | None, extra_class: str = "") -> str:
     return (
-        f"<td class='cell-badge{extra_class}' data-label='{label}' data-sort='{sort_value}'>"
+        f"<td class='cell-badge{extra_class}' data-label='{label}' data-sort='{_sort_attribute(sort_value)}'>"
         f"<span class='discount-value'>{html.escape(text)}</span></td>"
     )
 
@@ -619,30 +702,31 @@ def cell_badge(label: str, text: str, sort_value: float, extra_class: str = "") 
 def chip_cell(label: str, text: str, sort_text: str) -> str:
     return (
         f"<td class='cell-badge' data-label='{label}' data-sort='{html.escape(sort_text.lower(), quote=True)}'>"
-        f"<span class='data-chip'>{html.escape(text)}</span></td>"
+        f"<span class='data-chip'>{html.escape(text or '—')}</span></td>"
     )
 
 
 def render_row(item: dict[str, Any], profile: str) -> str:
-    rank = item.get("original_rank")  # None for a SCPI without score row: it is not ranked
-    scored = bool(item.get("has_scores"))
+    rank = item.get("original_rank")  # None when the SCPI is not ranked for this profile
+    score = item["profile_scores"].get(profile)
     sort_rank = item.get("sort_rank", rank or 0)
     name = str(item.get("name", "SCPI"))
     scpi_id = html.escape(str(item.get("scpi_id", "")), quote=True)
-    score = item["profile_scores"].get(profile, 0.0)
     duree = str(item.get("duree_tri_demembrement", "")).strip()
-    if duree and not duree.lower().endswith("ans"):
+    if is_missing_value(duree):
+        duree = ""
+    elif not duree.lower().endswith("ans"):
         duree = f"{duree} ans"
     rank_class = " rank-first" if rank == 1 else ""
     place_text = f"{rank:02}" if rank is not None else "—"
-    if scored:
+    if score is not None:
         score_cell = (
             f"<td class='cell-score' data-label='Note / 100' data-sort='{score}'>"
-            f"<span class='score-pill {category_class(score)}'>{score:.1f}</span></td>"
+            f"<span class='score-pill {category_class(score)}'>{format_score(score)}</span></td>"
         )
     else:
         score_cell = (
-            "<td class='cell-score' data-label='Note / 100' data-sort='-1'>"
+            "<td class='cell-score' data-label='Note / 100' data-sort=''>"
             "<span class='score-pill category-unavailable'>—</span></td>"
         )
     cells = [
@@ -653,8 +737,8 @@ def render_row(item: dict[str, Any], profile: str) -> str:
         cell_badge("Décote", display_percent(item.get("discount", "")), safe_float(item.get("discount"))),
         cell_badge("PGA", display_percent(item.get("pga", "")), safe_float(item.get("pga"))),
         cell_badge("TRI", display_percent(item.get("tri", "")), safe_float(item.get("tri"))),
-        chip_cell("Secteurs majoritaires", item.get("main_sectors", "—"), item.get("main_sectors", "")),
-        chip_cell("Régions majoritaires", item.get("main_regions", "—"), item.get("main_regions", "")),
+        chip_cell("Secteurs majoritaires", item.get("main_sectors", ""), item.get("main_sectors", "")),
+        chip_cell("Régions majoritaires", item.get("main_regions", ""), item.get("main_regions", "")),
         cell_badge(
             "TRI Max Nue Propriété",
             display_percent(item.get("tri_demembrement", "")),
@@ -669,7 +753,8 @@ def render_row(item: dict[str, Any], profile: str) -> str:
         ),
         cell_badge("Bonus Louve (cashback)", display_percent(item.get("bonus_louve", "")), safe_float(item.get("bonus_louve"))),
     ]
-    return "<tr>" + "".join(cells) + "</tr>"
+    # data-name: normalized name used by the in-frame search (accents and case ignored).
+    return f"<tr data-name='{html.escape(text_key(name), quote=True)}'>" + "".join(cells) + "</tr>"
 
 
 def render_detail(item: dict[str, Any], profile: str) -> str:
@@ -687,18 +772,18 @@ def render_detail(item: dict[str, Any], profile: str) -> str:
             f"<div class='category-item'><span class='category-dot {score_class}'>{score_text}</span>"
             f"<span class='category-label'>{html.escape(category)}</span></div>"
         )
-    fact_rows = fact_fields(item)
     fact_cells = "".join(
         f"<div class='fact-cell'><div class='fact-label'>{html.escape(label)}</div>"
         f"<div class='fact-value'>{html.escape(value)}</div></div>"
-        for label, value in fact_rows
+        for label, value in fact_fields(item)
     )
-    if not fact_rows:
-        fact_cells = "<div class='fact-cell'><div class='fact-label'>Données</div><div class='fact-value'>À renseigner dans le Google Sheet</div></div>"
-    if rank is None:
+    if rank is not None:
+        ordinal = "1re" if rank == 1 else f"{rank}e"
+        meta = f"{ordinal} place · Profil {html.escape(profile)}"
+    elif not item.get("has_scores"):
         meta = "Non classée · notes absentes de l’onglet Scores"
     else:
-        meta = f"{rank}e place · Profil {html.escape(profile)}"
+        meta = f"Non classée pour le profil {html.escape(profile)} · note absente ou invalide"
     return (
         f"<section class='detail' data-id='{scpi_id}' hidden>"
         "<button type='button' class='back' data-back>← Retour au classement</button>"
@@ -719,40 +804,53 @@ def build_mobile_select() -> str:
     return f"<div class='mobile-sort'><label for='mobile-sort'>Trier par :</label><select id='mobile-sort'>{options}</select></div>"
 
 
+def build_toolbar() -> str:
+    """Search field, plus the cards / table switch (only visible on narrow screens)."""
+    return (
+        "<div class='toolbar'>"
+        "<div class='view-toggle' role='group' aria-label='Affichage'>"
+        f"<button type='button' data-view='cards' aria-pressed='true'>{VIEW_CARDS_LABEL}</button>"
+        f"<button type='button' data-view='table' aria-pressed='false'>{VIEW_TABLE_LABEL}</button>"
+        "</div>"
+        "<div class='search-field'>"
+        f"<input id='search' type='search' maxlength='{SEARCH_MAX_LENGTH}' autocomplete='off' "
+        "placeholder='🔍 Rechercher une SCPI...' aria-label='Rechercher une SCPI'>"
+        "<button type='button' id='search-clear' aria-label='Effacer la recherche' hidden>✕</button>"
+        "</div></div>"
+    )
+
+
 def build_ranking_document(
     rows_html: list[str],
     details_html: str,
     *,
-    mobile: bool,
-    view: str,
     theme: str,
     initial_detail_id: str | None,
 ) -> str:
     """Assemble the frame document from rows and detail sheets that are already rendered."""
-    view_class = "view-cards" if mobile and view == MOBILE_VIEW_CARDS else "view-table"
     header_cells = "".join(
-        f"<th class='sort-btn' data-type='{sort_type}' data-dir='none'>{label} "
+        f"<th class='sort-btn' tabindex='0' aria-sort='none' data-type='{sort_type}' data-dir='none'>{label} "
         "<span class='icon' style='opacity: 0.3;'>↕</span></th>"
         for _, label, sort_type in TABLE_HEADERS
     )
-    body_rows = rows_html or [
-        "<tr><td colspan='11' class='empty'>Aucune SCPI ne correspond à votre recherche.</td></tr>"
-    ]
+    empty_row = (
+        f"<tr id='empty-row'{' hidden' if rows_html else ''}>"
+        f"<td colspan='{len(TABLE_HEADERS)}' class='empty'>Aucune SCPI ne correspond à votre recherche.</td></tr>"
+    )
     initial = html.escape(initial_detail_id or "", quote=True)
     detail_class = " show-detail" if initial_detail_id else ""
-    select_html = build_mobile_select() if mobile else ""
     return (
         "<!DOCTYPE html><html lang='fr'><head><meta charset='utf-8'>"
         f"<meta http-equiv=\"Content-Security-Policy\" content=\"{FRAME_CSP}\">"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<style>{FRAME_CSS}</style></head>"
         f"<body class='{theme}'>"
-        f"<div class='app {view_class}{detail_class}' data-initial='{initial}'>"
+        f"<div class='app view-cards{detail_class}' data-initial='{initial}'>"
         "<div class='list'>"
-        f"{select_html}"
+        f"{build_toolbar()}{build_mobile_select()}"
         "<div class='scroll'><table class='ranking-table' id='ranking'>"
         f"<thead><tr>{header_cells}</tr></thead>"
-        f"<tbody>{''.join(body_rows)}</tbody>"
+        f"<tbody>{''.join(rows_html)}{empty_row}</tbody>"
         "</table></div></div>"
         f"{details_html}</div>"
         f"<script>{FRAME_JS}</script>"
@@ -760,74 +858,55 @@ def build_ranking_document(
     )
 
 
-def frame_height(row_count: int, *, mobile: bool, view: str) -> int:
-    rows = max(1, row_count)
-    if not mobile:
-        return max(TABLE_HEADER_PX + rows * DESKTOP_ROW_PX, DESKTOP_DETAIL_PX)
-    if view == MOBILE_VIEW_CARDS:
-        return max(rows * MOBILE_CARD_PX + 40, MOBILE_DETAIL_PX)
-    return max(TABLE_HEADER_PX + rows * MOBILE_TABLE_ROW_PX, MOBILE_DETAIL_PX)
-
-
 def render_ranking_frame(
     rows_html: list[str],
     details_html: str,
     *,
-    mobile: bool,
-    view: str,
     theme: str,
     initial_detail_id: str | None,
 ) -> None:
     document = build_ranking_document(
         rows_html,
         details_html,
-        mobile=mobile,
-        view=view,
         theme=theme,
         initial_detail_id=initial_detail_id,
     )
-    components.html(
-        document,
-        height=frame_height(len(rows_html), mobile=mobile, view=view),
-        scrolling=True,
-    )
+    render_html_frame(document, height=FRAME_INITIAL_HEIGHT_PX, scrolling=True)
 
 
-@st.cache_data(ttl=SHEET_CACHE_TTL_SECONDS, max_entries=16, show_spinner=False)
+# st.cache_resource returns the very same object on every call (no copy of several megabytes
+# per rerun, unlike st.cache_data). The cached values are shared by all sessions: read-only.
+@st.cache_resource(ttl=SHEET_CACHE_TTL_SECONDS, max_entries=16, show_spinner=False)
 def build_profile_view(version: int, profile: str, _data: dict[str, list[dict[str, str]]]) -> dict[str, Any]:
-    """Ranking of one profile, rendered once per data version (not on every keystroke).
+    """Ranking of one profile, rendered once per data version.
 
     `version` and `profile` are the cache key; `_data` is not hashed (leading underscore).
-    SCPI without a score row come last and are not numbered.
+    A SCPI without a valid score for this profile comes last and is not numbered.
     """
     rankings = build_rankings(_data)
+    for item in rankings:
+        item["ranked"] = item["profile_scores"].get(profile) is not None
     rankings.sort(
-        key=lambda item: (item["has_scores"], item["profile_scores"].get(profile, 0.0)),
+        key=lambda item: (item["ranked"], item["profile_scores"].get(profile) or 0.0),
         reverse=True,
     )
     rank = 0
     for position, item in enumerate(rankings, start=1):
-        if item["has_scores"]:
+        if item["ranked"]:
             rank += 1
             item["original_rank"] = rank
         else:
             item["original_rank"] = None
         item["sort_rank"] = position
     return {
-        "rows": [
-            {
-                "id": item["scpi_id"],
-                "name_lower": str(item["name"]).lower(),
-                "html": render_row(item, profile),
-            }
-            for item in rankings
-        ],
+        "rows_html": [render_row(item, profile) for item in rankings],
+        "ids": frozenset(item["scpi_id"] for item in rankings),
         "details_html": "".join(render_detail(item, profile) for item in rankings),
         "warnings": validate_scores(_data) + validate_join(_data),
     }
 
 
-@st.cache_data(ttl=SHEET_CACHE_TTL_SECONDS, max_entries=4, show_spinner=False)
+@st.cache_resource(ttl=SHEET_CACHE_TTL_SECONDS, max_entries=4, show_spinner=False)
 def build_criteria_warnings(
     data_version: int,
     weights_version: int,
@@ -858,35 +937,28 @@ require_access()
 
 load_error = ""
 data_version = 0
-stale_age_minutes: int | None = None
 data: dict[str, list[dict[str, str]]] = {"data": [], "scores": []}
 try:
     data_result = DATA_STORE.get()
     data, data_version = data_result.value, data_result.version
-    if data_result.stale:
-        stale_age_minutes = max(1, int((time.time() - data_result.loaded_at) // 60))
+    # data_result.stale (older data served after a failed refresh) is logged by the store.
 except SheetLoadError as error:
     load_error = str(error)
 except Exception:
     logger.exception("Unexpected error while loading the Google Sheet")
     load_error = "Erreur interne lors du chargement des données."
 
-masthead_status = "Source connectée"
 st.markdown(
-    f"""
+    """
     <header class="masthead">
         <div class="brand-line"><span class="brand-mark">S</span><span>SCPIScreen</span>
             <span class="brand-divider"></span></div>
         <div class="masthead-body"><div>
             <div class="masthead-title">Classement des SCPI</div>
             <div class="masthead-lede">Selon plusieurs profils d’investissement</div>
-    """
-    #    </div><div class="masthead-tools">
-    #        <span class="source-badge">{masthead_status}</span>
-    #    </div></div>
-    #</header>
-    #"""
-    ,
+        </div></div>
+    </header>
+    """,
     unsafe_allow_html=True,
 )
 
@@ -948,15 +1020,14 @@ with st.container(key="page_navigation"):
     )
 
 if requested_page == PAGE_METHOD:
-    # Widgets that are not rendered lose their state: re-assign it to keep the user's choices.
-    for preserved_key in ("profile_selector", "mobile_view_selector"):
-        if preserved_key in st.session_state:
-            st.session_state[preserved_key] = st.session_state[preserved_key]
+    # Widgets that are not rendered lose their state: re-assign it to keep the user's choice.
+    if "profile_selector" in st.session_state:
+        st.session_state["profile_selector"] = st.session_state["profile_selector"]
     render_method_page()
     render_footer()
     st.stop()
 
-profile_column, empty_column = st.columns([1.7, 0.3])
+profile_column, _unused_column = st.columns([1.7, 0.3])
 with profile_column:
     st.markdown('<div class="profile-label">Profil d’investissement</div>', unsafe_allow_html=True)
     profile = st.segmented_control(
@@ -969,7 +1040,7 @@ with profile_column:
     )
 profile = profile or PROFILE_ORDER[0]
 
-view: dict[str, Any] = {"rows": [], "details_html": "", "warnings": []}
+view: dict[str, Any] = {"rows_html": [], "ids": frozenset(), "details_html": "", "warnings": []}
 if not load_error:
     try:
         view = build_profile_view(data_version, profile, data)
@@ -977,122 +1048,55 @@ if not load_error:
         logger.exception("Unexpected error while building the rankings")
         load_error = "Erreur interne lors de la préparation des données."
 
+if load_error:
+    st.error(f"Les données du Google Sheet ne sont pas accessibles : {md_text(load_error)}")
+    render_footer()
+    st.stop()
+
 criteria_warnings: list[str] = []
-if not load_error:
-    weights_version, weight_rows = 0, []
-    try:
-        weights_result = WEIGHTS_STORE.get()
-        weights_version, weight_rows = weights_result.version, weights_result.value
-    except SheetLoadError:
-        pass  # An unreachable weights tab is reported by the method page; the check goes on without it.
-    except Exception:
-        logger.exception("Unexpected error while loading the weights for the missing-data check")
-    try:
-        criteria_warnings = build_criteria_warnings(data_version, weights_version, data, weight_rows)
-    except Exception:
-        logger.exception("Unexpected error while checking the data for missing values")
+weights_version, weight_rows = 0, []
+try:
+    weights_result = WEIGHTS_STORE.get()
+    weights_version, weight_rows = weights_result.version, weights_result.value
+except SheetLoadError:
+    pass  # An unreachable weights tab is reported by the method page; the check goes on without it.
+except Exception:
+    logger.exception("Unexpected error while loading the weights for the missing-data check")
+try:
+    criteria_warnings = build_criteria_warnings(data_version, weights_version, data, weight_rows)
+except Exception:
+    logger.exception("Unexpected error while checking the data for missing values")
 
 # Missing-data warnings come first: they can distort the scores themselves.
 data_warnings = [*criteria_warnings, *view["warnings"]]
-
-if load_error:
-    st.error(f"Les données du Google Sheet ne sont pas accessibles : {md_text(load_error)}")
-#if stale_age_minutes is not None and stale_age_minutes > (24 * 60):
-#    st.warning(
-#        f"La source Google Sheets est momentanément inaccessible : les données affichées "
-#        f"datent d’environ {round(stale_age_minutes / 60)} heure(s)."
-#    )
 for message in data_warnings[:MAX_WARNINGS_DISPLAYED]:
     st.warning(md_text(message))
 if len(data_warnings) > MAX_WARNINGS_DISPLAYED:
     remaining_warnings = len(data_warnings) - MAX_WARNINGS_DISPLAYED
     st.warning(md_text(f"{remaining_warnings} autre(s) avertissement(s) dans le Google Sheet."))
 
-# Deep link to a SCPI sheet: applied on the first render of a session only, so later
-# reruns (search, profile, view) keep the table, while the URL stays shareable.
+# Deep link to a SCPI sheet: applied (and, if unknown, reported) on the first render of a session
+# only, so later reruns keep the table and show no repeated error, while the URL stays shareable.
 requested_scpi = str(st.query_params.get("scpi", "") or "")
-known_ids = {row["id"] for row in view["rows"]}
 initial_detail_id: str | None = None
-if requested_scpi and requested_scpi not in known_ids:
-    st.error("Cette fiche SCPI est introuvable dans la source de données.")
-elif requested_scpi and "deep_link_consumed" not in st.session_state:
-    initial_detail_id = requested_scpi
+if requested_scpi and "deep_link_consumed" not in st.session_state:
+    if requested_scpi in view["ids"]:
+        initial_detail_id = requested_scpi
+    else:
+        st.error("Cette fiche SCPI est introuvable dans la source de données.")
 st.session_state["deep_link_consumed"] = True
 
-with st.container(key="mobile_view_toolbar"):
-    st.markdown('<div class="profile-label">Affichage</div>', unsafe_allow_html=True)
-    mobile_view = st.segmented_control(
-        "Affichage",
-        MOBILE_VIEW_OPTIONS,
-        default=MOBILE_VIEW_CARDS,
-        key="mobile_view_selector",
-        label_visibility="collapsed",
-        width="stretch",
-    )
-mobile_view = mobile_view or MOBILE_VIEW_CARDS
+st.markdown(
+    f"<div class='section-heading' style='margin-top: 0.5rem; margin-bottom: 0.5rem;'><div><div class='section-kicker'>{html.escape(profile)}</div>"
+    "<div class='section-title'>Classement complet</div></div></div>",
+    unsafe_allow_html=True,
+)
 
-col_heading, col_search = st.columns([1.5, 1])
-with col_heading:
-    st.markdown(
-        f"<div class='section-heading' style='margin-top: 0.5rem; margin-bottom: 0.5rem;'><div><div class='section-kicker'>{html.escape(profile)}</div>"
-        "<div class='section-title'>Classement complet</div></div></div>",
-        unsafe_allow_html=True,
-    )
-with col_search:
-    # Changing the widget key resets the field, which is how the clear button empties it.
-    search_reset_count = st.session_state.setdefault("search_reset_count", 0)
-    search_key = f"scpi_search_{search_reset_count}"
-    with st.container(key="search_box"):
-        if HAS_KEYUP:
-            keyup_options: dict[str, Any] = {}
-            if "value" in inspect.signature(st_keyup).parameters:
-                keyup_options["value"] = ""
-            search_query = st_keyup(
-                "Recherche",
-                placeholder="🔍 Rechercher une SCPI...",
-                label_visibility="collapsed",
-                debounce=250,
-                key=search_key,
-                **keyup_options,
-            )
-        else:
-            search_query = st.text_input(
-                "Recherche",
-                placeholder="🔍 Rechercher une SCPI... (Appuyez sur Entrée)",
-                label_visibility="collapsed",
-                key=search_key,
-                max_chars=SEARCH_MAX_LENGTH,
-            )
-        # Overlaid on the right of the field by CSS; only shown when there is text to clear.
-        if search_query and st.button("✕", key="search_clear", help="Effacer la recherche"):
-            st.session_state["search_reset_count"] = search_reset_count + 1
-            st.rerun()
-
-search_text = str(search_query or "").strip()[:SEARCH_MAX_LENGTH]
-search_lower = search_text.lower()
-visible_rows = [
-    row["html"] for row in view["rows"]
-    if not search_lower or search_lower in row["name_lower"]
-]
-
-theme = current_theme()
-with st.container(key="ranking_desktop"):
-    render_ranking_frame(
-        visible_rows,
-        view["details_html"],
-        mobile=False,
-        view=MOBILE_VIEW_TABLE,
-        theme=theme,
-        initial_detail_id=initial_detail_id,
-    )
-with st.container(key="ranking_mobile"):
-    render_ranking_frame(
-        visible_rows,
-        view["details_html"],
-        mobile=True,
-        view=mobile_view,
-        theme=theme,
-        initial_detail_id=initial_detail_id,
-    )
+render_ranking_frame(
+    view["rows_html"],
+    view["details_html"],
+    theme=current_theme(),
+    initial_detail_id=initial_detail_id,
+)
 
 render_footer()

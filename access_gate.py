@@ -16,11 +16,12 @@ import os
 import time
 from datetime import datetime
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 import access_control
+from html_frame import render_html_frame
 
 logger = logging.getLogger("scpiscreen")
 
@@ -29,11 +30,16 @@ INSECURE_HTTP_ENV = "SCPISCREEN_ALLOW_INSECURE_HTTP"
 # The __Host- prefix makes browsers accept the cookie only if it is Secure, has Path=/ and no Domain.
 AUTH_COOKIE_NAME = "__Host-scpiscreen_access"
 AUTH_COOKIE_TTL_SECONDS = access_control.SESSION_TTL_SECONDS
+# Lax (not Strict): a Strict cookie is not sent when the app is opened from another site
+# (a link in a message, an embedding page), which looked like "the cookie does not work".
+AUTH_COOKIE_SAMESITE = "Lax"
 ACCESS_CODE_MAX_INPUT = 256
 BAN_DURATION_HOURS = access_control.BAN_DURATION_SECONDS // 3600
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+DISPLAY_TIMEZONE = "Europe/Paris"
 SESSION_FLAG = "access_granted"
 PENDING_COOKIE_KEY = "pending_session_cookie"
+COOKIE_LOGGED_KEY = "cookie_state_logged"
 
 
 # ---- Helpers ----------------------------------------------------------------------
@@ -58,8 +64,23 @@ def render_gate_header() -> None:
     )
 
 
-def render_ban_notice(until: float) -> None:
-    until_text = datetime.fromtimestamp(until).strftime("%d/%m/%Y à %H:%M")
+def _format_local_time(timestamp: float) -> str:
+    """Date and time in the visitors' time zone (the server usually runs in UTC)."""
+    try:
+        moment = datetime.fromtimestamp(timestamp, ZoneInfo(DISPLAY_TIMEZONE))
+    except (ZoneInfoNotFoundError, ValueError):
+        moment = datetime.fromtimestamp(timestamp)
+    return moment.strftime("%d/%m/%Y à %H:%M")
+
+
+def render_ban_notice(until: float, scope: str = "client") -> None:
+    until_text = _format_local_time(until)
+    if scope == "global":
+        st.error(
+            "Trop de tentatives de connexion ont été enregistrées sur l’application. "
+            f"Réessayez après {until_text}."
+        )
+        return
     st.error(f"Accès temporairement bloqué depuis cette adresse jusqu’au {until_text}.")
 
 
@@ -134,7 +155,7 @@ def _persist_cookie() -> None:
     """Write the session cookie from the page itself, with exact attributes.
 
     A tiny script runs in a same-origin frame and sets the cookie on the page (Path=/, Secure,
-    SameSite=Strict, one year), which is what the __Host- prefix requires and what the server
+    SameSite=Lax, one year), which is what the __Host- prefix requires and what the server
     receives on the next visit. The frame is rendered again on every run of this session, so
     a rerun right after the login cannot remove it before it has executed.
     """
@@ -143,14 +164,15 @@ def _persist_cookie() -> None:
         return
     cookie = (
         f"{AUTH_COOKIE_NAME}={token}; Max-Age={AUTH_COOKIE_TTL_SECONDS}; "
-        "Path=/; Secure; SameSite=Strict"
+        f"Path=/; Secure; SameSite={AUTH_COOKIE_SAMESITE}"
     )
     script = (
         "<script>(function(){var c=" + json.dumps(cookie) + ";"
-        "try{window.parent.document.cookie=c;}catch(e){document.cookie=c;}})();</script>"
+        "try{window.parent.document.cookie=c;}catch(e){"
+        "try{document.cookie=c;}catch(e2){}}})();</script>"
     )
     with st.container(key="cookie_setter"):
-        components.html(script, height=0)
+        render_html_frame(script, height=0, scrolling=False)
 
 
 # ---- Login form -------------------------------------------------------------------
@@ -174,7 +196,7 @@ def _render_login(access_code: str, client_key: str | None) -> None:
                 "Code d’accès", type="password", max_chars=ACCESS_CODE_MAX_INPUT
             )
             submitted = st.form_submit_button(
-                "Accéder au classement", type="primary", use_container_width=True
+                "Accéder au classement", type="primary", width="stretch"
             )
     if not submitted:
         return
@@ -186,8 +208,8 @@ def _render_login(access_code: str, client_key: str | None) -> None:
         else:
             decision = _register_fallback_attempt()
         if not decision.allowed:
-            access_control.log_event("ban_refused", client_key)
-            render_ban_notice(decision.banned_until or time.time())
+            access_control.log_event("ban_refused", client_key, scope=decision.scope)
+            render_ban_notice(decision.banned_until or time.time(), decision.scope)
             return
 
         code_is_valid = len(submitted_code) <= ACCESS_CODE_MAX_INPUT and access_control.access_code_matches(
@@ -216,14 +238,31 @@ def _render_login(access_code: str, client_key: str | None) -> None:
 # ---- Public entry point -----------------------------------------------------------
 
 
+def _resume_session_from_cookie(client_key: str | None) -> None:
+    """Grant access from a valid cookie, and log (once per session) why a visitor was not resumed."""
+    cookie = _read_auth_cookie()
+    if cookie is not None and access_control.is_valid_session(cookie):
+        st.session_state[SESSION_FLAG] = True
+        access_control.log_event("session_resumed", client_key)
+        return
+    if not st.session_state.get(COOKIE_LOGGED_KEY):
+        st.session_state[COOKIE_LOGGED_KEY] = True
+        # cookie_absent: the browser did not send it (never written, expired, blocked, not sent).
+        # cookie_rejected: it was sent but is not valid (secret or access code changed, expired, tampered).
+        access_control.log_event("cookie_absent" if cookie is None else "cookie_rejected", client_key)
+
+
 def require_access() -> None:
     """Return only when the visitor is allowed in; otherwise render the gate and stop the script."""
     access_code = os.environ.get(ACCESS_CODE_ENV, "").strip()
     if len(access_code) < access_control.ACCESS_CODE_MIN_LENGTH:
-        st.error(
-            f"Authentification non configurée : définissez {ACCESS_CODE_ENV} "
-            f"({access_control.ACCESS_CODE_MIN_LENGTH} caractères minimum) dans l’environnement du serveur."
+        # The variable name stays in the server log: visitors only get a generic message.
+        logger.error(
+            "%s is missing or shorter than %d characters",
+            ACCESS_CODE_ENV,
+            access_control.ACCESS_CODE_MIN_LENGTH,
         )
+        st.error("Le contrôle d’accès n’est pas configuré. Contactez l’administrateur.")
         st.stop()
 
     client_key = current_client_key()  # None when Streamlit does not expose the address
@@ -233,9 +272,7 @@ def require_access() -> None:
             access_control.ban_until(client_key) if client_key is not None else _fallback_ban_until()
         )
         if banned_until is None and not st.session_state.get(SESSION_FLAG, False):
-            if access_control.is_valid_session(_read_auth_cookie()):
-                st.session_state[SESSION_FLAG] = True
-                access_control.log_event("session_resumed", client_key)
+            _resume_session_from_cookie(client_key)
     except access_control.AccessStateError:
         logger.exception("Access state unreadable")
         _unavailable()

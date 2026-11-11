@@ -5,6 +5,10 @@ on:
     - cron: '0 */8 * * *'
   workflow_dispatch:
 
+# The job pushes a commit: the default token of recent repositories is read-only.
+permissions:
+  contents: write
+
 jobs:
   keep-alive:
     runs-on: ubuntu-latest

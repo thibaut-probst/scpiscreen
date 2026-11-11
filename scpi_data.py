@@ -13,6 +13,7 @@ import unicodedata
 import urllib.parse
 import urllib.request
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, TypeVar
 
@@ -71,8 +72,8 @@ SHEET_RETRY_AFTER_SECONDS = 60
 
 # Missing-data check. A column that is "NA" for almost every SCPI silently skews the scores
 # or leaves the table empty, so a warning is shown above the ranking. Two layers:
-#   1. every criterion of the weights tab (blank cells count as missing, and the warning
-#      reports the weight of the criterion in each profile);
+#   1. every weighted criterion of the weights tab (blank cells count as missing, and the
+#      warning reports the weight of the criterion in each profile);
 #   2. every other column of the checked tabs (only explicit "NA" cells count, so that
 #      optional columns that are simply left blank do not raise a warning).
 MISSING_CRITERION_THRESHOLD = 0.5  # flagged when strictly more than 50 % of the rows are missing
@@ -151,6 +152,11 @@ def _read_google_csv(sheet_id: str, worksheet: str, header_rows: int | None = No
         raise SheetLoadError(f"L’onglet « {worksheet} » n’est pas un texte UTF-8 valide.") from error
 
 
+def _normalize_header(value: Any) -> str:
+    """Header with every run of whitespace (non-breaking and doubled spaces included) collapsed."""
+    return " ".join(str(value).split())
+
+
 def _read_sheet(sheet_id: str, worksheet: str) -> list[dict[str, str]]:
     content = _read_google_csv(sheet_id, worksheet)
     try:
@@ -160,16 +166,16 @@ def _read_sheet(sheet_id: str, worksheet: str) -> list[dict[str, str]]:
     if not rows:
         raise SheetLoadError(f"L’onglet « {worksheet} » est vide ou mal nommé.")
     return [
-        {str(key).strip(): (value or "").strip() for key, value in row.items() if key}
+        {_normalize_header(key): (value or "").strip() for key, value in row.items() if key}
         for row in rows
     ]
 
 
 def load_google_sheet(sheet_id: str, worksheets: dict[str, str]) -> dict[str, list[dict[str, str]]]:
-    """Load all configured tabs from a Google Sheet published as CSV."""
-    data: dict[str, list[dict[str, str]]] = {}
-    for key, tab_name in worksheets.items():
-        data[key] = _read_sheet(sheet_id, tab_name)
+    """Load all configured tabs from a Google Sheet published as CSV (tabs are fetched in parallel)."""
+    with ThreadPoolExecutor(max_workers=max(1, len(worksheets))) as pool:
+        futures = {key: pool.submit(_read_sheet, sheet_id, name) for key, name in worksheets.items()}
+        data = {key: future.result() for key, future in futures.items()}
     data_rows = data.get("data", [])
     if data_rows and "SCPI" not in data_rows[0]:
         data_tab = worksheets.get("data", "Data")
@@ -177,36 +183,47 @@ def load_google_sheet(sheet_id: str, worksheets: dict[str, str]) -> dict[str, li
     return data
 
 
-def _number(value: Any, default: float = 0.0) -> float:
-    """Lenient number parser. Non-numeric and non-finite values (nan, inf) return the default."""
-    if value is None or str(value).strip() == "":
-        return default
-    normalized = str(value).strip().replace("%", "").replace(" ", "").replace(",", ".")
-    try:
-        number = float(normalized)
-    except ValueError:
-        return default
-    return number if math.isfinite(number) else default
+# ---- Number parsing ---------------------------------------------------------------
+
+_WHITESPACE = re.compile(r"\s+")
+_YEARS_SUFFIX = re.compile(r"ans$", re.IGNORECASE)
 
 
-def parse_score(value: Any) -> float | None:
-    """Parse a score cell. Return None when the cell is empty or not a finite number."""
-    text = "" if value is None else str(value)
-    normalized = text.strip().replace("%", "").replace(" ", "").replace(",", ".")
-    if not normalized:
+def parse_number(value: Any) -> float | None:
+    """The only number parser of the app.
+
+    Accepts a comma or a dot as decimal separator, any kind of space (including the
+    non-breaking spaces used in French number formats), a trailing "%" or "ans".
+    Returns None for an empty, non-numeric or non-finite value (nan, inf).
+    """
+    if value is None:
+        return None
+    text = _WHITESPACE.sub("", str(value)).replace("%", "").replace(",", ".")
+    text = _YEARS_SUFFIX.sub("", text)
+    if not text:
         return None
     try:
-        number = float(normalized)
+        number = float(text)
     except ValueError:
         return None
     return number if math.isfinite(number) else None
 
 
-def validated_score(value: Any) -> float:
-    """A score as displayed: finite and within 0 to 100, otherwise 0 (as the warning banner says)."""
+def _number(value: Any, default: float = 0.0) -> float:
+    """Lenient number parser: unusable values return the default."""
+    number = parse_number(value)
+    return default if number is None else number
+
+
+# Name kept for the Scores tab validation: None when the cell is empty or not a finite number.
+parse_score = parse_number
+
+
+def validated_score(value: Any) -> float | None:
+    """A score as displayed: a finite number within 0 to 100, otherwise None (unavailable)."""
     number = parse_score(value)
     if number is None or not SCORE_MIN <= number <= SCORE_MAX:
-        return 0.0
+        return None
     return number
 
 
@@ -260,6 +277,9 @@ def build_rankings(data: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]
     The join is strict: a SCPI is matched to a score row by name only (case, accents and
     spacing are ignored). There is no positional fallback. A SCPI without a score row is
     returned with has_scores=False and is never ranked. Duplicated score labels use the first row.
+
+    A score that is empty, not numeric or outside 0 to 100 is None: the SCPI is not ranked for
+    that profile (a category score of None is shown as unavailable). No score is ever invented.
     """
     rows = data.get("data", [])
     score_rows = data.get("scores", [])
@@ -281,8 +301,8 @@ def build_rankings(data: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]
         score_row = score_by_name.get(_text_key(name))
         has_scores = score_row is not None
         scores = score_row or {}
-        profile_scores = {
-            profile: validated_score(scores.get(column)) if has_scores else 0.0
+        profile_scores: dict[str, float | None] = {
+            profile: validated_score(scores.get(column)) if has_scores else None
             for profile, column in PROFILE_SCORE_COLUMNS.items()
         }
         category_scores: dict[str, float | None] = {
@@ -295,9 +315,6 @@ def build_rankings(data: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]
             "scpi_id": _unique_id(name, used_ids),
             "name": name,
             "has_scores": has_scores,
-            "manager": "",
-            "strategy": row.get("Stratégie sectorielle", "").strip(),
-            "market": row.get("Région majoritaire", "").strip(),
             "discount": row.get("Décote", "").strip(),
             "liquidity_rate": row.get("Taux de liquidité", "").strip(),
             "debt_rate": row.get("Taux d'endettement", "").strip(),
@@ -309,15 +326,11 @@ def build_rankings(data: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]
             "valeur_souscription": row.get("Valeur de souscription", "").strip(),
             "valeur_reconstitution": row.get("Valeur de reconstitution", "").strip(),
             "part_de_secteur_majoritaire": row.get("Part de secteur majoritaire", "").strip(),
-            "part_logements_idf": row.get("Part de logements en IdF", "").strip(),
-            "part_logements_regions": row.get("Part de logements en régions", "").strip(),
-            "part_logements_hors_france": row.get("Part de logements hors de  France", "").strip(),
+            "part_logements_hors_france": row.get("Part de logements hors de France", "").strip(),
             "part_de_region_majoritaire": row.get("Part de région majoritaire", "").strip(),
-            "regions_majoritaires": row.get("Régions majoritaires", "").strip(),
             "tof": row.get("TOF", "").strip(),
             "top": row.get("TOP", "").strip(),
             "tof_top": row.get("TOF-TOP", "").strip(),
-            "capitalisation": row.get("Capitalisation", "").strip(),
             "capitalisation_m": row.get("Capitalisation (M)", "").strip(),
             "creation": row.get("Création", "").strip(),
             "frais_entree": row.get("Frais d'entrée", "").strip(),
@@ -348,6 +361,7 @@ def validate_scores(data: dict[str, list[dict[str, str]]]) -> list[str]:
         if column not in headers:
             messages.append(f"La colonne « {column} » est absente de l’onglet « Scores ».")
 
+    profile_columns = set(PROFILE_SCORE_COLUMNS.values())
     invalid_labels: dict[str, list[str]] = {}
     for row in score_rows:
         label = row.get("Catégorie SCPI", "").strip()
@@ -356,17 +370,17 @@ def validate_scores(data: dict[str, list[dict[str, str]]]) -> list[str]:
         for column in SCORE_COLUMNS:
             if column not in headers:
                 continue
-            value = parse_score(row.get(column))
-            if value is None or not SCORE_MIN <= value <= SCORE_MAX:
+            if validated_score(row.get(column)) is None:
                 invalid_labels.setdefault(column, []).append(label)
 
     for column, labels in invalid_labels.items():
-        listed = ", ".join(labels[:5])
-        remaining = len(labels) - 5
-        suffix = f" et {remaining} autre(s)" if remaining > 0 else ""
+        consequence = (
+            "Ces SCPI ne sont pas classées pour ce profil."
+            if column in profile_columns
+            else "Cette valeur est affichée comme indisponible."
+        )
         messages.append(
-            f"Valeur absente ou hors de 0 à 100 dans « {column} » pour : {listed}{suffix}. "
-            "Cette valeur est comptée comme 0."
+            f"Valeur absente ou hors de 0 à 100 dans « {column} » pour : {_summarize(labels)}. {consequence}"
         )
     return messages
 
@@ -433,9 +447,9 @@ def validate_join(data: dict[str, list[dict[str, str]]]) -> list[str]:
     return messages
 
 
-def _is_missing_cell(value: Any) -> bool:
+def is_missing_value(value: Any) -> bool:
     """True when a cell is empty or holds an "NA"-like token (case and accents ignored)."""
-    return _text_key(value or "") in MISSING_TOKENS
+    return _text_key("" if value is None else value) in MISSING_TOKENS
 
 
 def _scpi_rows(data: dict[str, list[dict[str, str]]], tab: str) -> list[dict[str, str]]:
@@ -479,9 +493,12 @@ def validate_missing_criteria(
 
     `matrix` is the result of build_weight_matrix() (pass {"profiles": [], "criteria": []}
     when the weights tab is unavailable: the second layer still works). Two layers:
-      1. the weighted criteria, found by their header in CRITERIA_TABS; the warning gives their
-         weight in each profile. Criteria without any weight cannot change a score and are skipped;
-      2. every other column of those tabs, counting only explicit "NA" cells.
+      1. the weighted criteria, found by their header in CRITERIA_TABS (first tab that has the
+         column); the warning gives their weight in each profile. Only the column really
+         evaluated here is skipped by layer 2;
+      2. every other column of those tabs, counting only explicit "NA" cells. This covers the
+         criteria without any weight and the same-named column of the tab that layer 1 did not
+         evaluate (for example the raw "Data" column behind a criterion note of "Scores").
     """
     profiles: list[str] = matrix.get("profiles", [])
     criteria: list[dict[str, Any]] = matrix.get("criteria", [])
@@ -493,23 +510,20 @@ def validate_missing_criteria(
 
     # (share, top weight impact, sort label, message)
     findings: list[tuple[float, float, str, str]] = []
-    checked: set[tuple[str, str]] = set()  # (tab, column) already handled by layer 1
+    checked: set[tuple[str, str]] = set()  # (tab, column) already evaluated by layer 1
 
     # Layer 1: weighted criteria.
     for criterion in criteria:
         weights = criterion["weights"]
-        weighted = any(weights.get(profile, 0.0) > 0 for profile in profiles)
-        evaluated = False
+        if not any(weights.get(profile, 0.0) > 0 for profile in profiles):
+            continue  # no weight: it cannot change a score, layer 2 still checks the column
         for tab in CRITERIA_TABS:
             rows = rows_by_tab[tab]
             column = _find_criterion_column(rows, criterion["category"], criterion["name"])
             if column is None:
                 continue
-            if evaluated or not weighted:
-                continue
-            evaluated = True  # only the first tab that has the column is evaluated
-            checked.add((tab, column))  # also keeps layer 2 from reporting it again
-            missing = sum(1 for row in rows if _is_missing_cell(row.get(column)))
+            checked.add((tab, column))
+            missing = sum(1 for row in rows if is_missing_value(row.get(column)))
             share = missing / len(rows)
             if share > threshold:
                 impacts = [
@@ -527,6 +541,7 @@ def validate_missing_criteria(
                     f"Poids dans le scoring : {impact_text}. "
                     "Les notes qui en dépendent peuvent être faussées.",
                 ))
+            break  # only the first tab that has the column is evaluated
 
     # Layer 2: every other column (explicit "NA" cells only).
     for tab in CRITERIA_TABS:
@@ -534,6 +549,7 @@ def validate_missing_criteria(
         if not rows:
             continue
         excluded = _excluded_columns(data, tab)
+        tab_name = WORKSHEETS.get(tab, tab)
         for column in rows[0]:
             if column in excluded or (tab, column) in checked:
                 continue
@@ -542,12 +558,11 @@ def validate_missing_criteria(
             )
             share = missing / len(rows)
             if share > threshold:
-                tab_name = WORKSHEETS.get(tab, tab)
                 findings.append((
                     share,
                     0.0,
                     column,
-                    f"Attention : la donnée « {column} » n'est pas disponible "
+                    f"Attention : la donnée « {column} » (onglet « {tab_name} ») n'est pas disponible "
                     f"pour {missing} SCPI sur {len(rows)} ({share * 100:.0f} %). "
                     "Le calcul des scores qui l'utilisent peut être faussé.",
                 ))
@@ -573,7 +588,7 @@ def _text_key(value: Any) -> str:
 
 
 def text_key(value: Any) -> str:
-    """Public alias of the tolerant label normalization, used for sorting."""
+    """Public alias of the tolerant label normalization, used for sorting and for the search."""
     return _text_key(value)
 
 
@@ -654,7 +669,7 @@ def build_weight_matrix(rows: list[list[str]]) -> dict[str, Any]:
     for profile in profiles:
         row = profile_rows[profile]
         values = [
-            min(max(0.0, _number("".join(row[index].split()))), WEIGHT_MAX) if index < len(row) else 0.0
+            min(max(0.0, _number(row[index])), WEIGHT_MAX) if index < len(row) else 0.0
             for index, _, _ in columns
         ]
         # Fractions such as 0.04 (instead of 4 %) are converted to percentages.

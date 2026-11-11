@@ -1,16 +1,23 @@
-"""Shared access code with per-client lockout, server-side sessions and an audit log.
+"""Shared access code with per-client lockout, signed sessions and an audit log.
 
 - The access code is compared on SHA-256 digests (constant time, no length leak).
 - Each client gets MAX_FAILED_ATTEMPTS attempts before a BAN_DURATION_SECONDS ban.
   Attempts are registered *before* the code is compared, in one atomic step, so
   parallel sessions cannot exceed the limit. Counters expire after FAILURE_WINDOW_SECONDS.
-- Clients are stored under a keyed HMAC tag, never as a clear IP address. The key is a
-  random server secret kept in the state directory (it is NOT derived from the access code).
-- Session cookies carry random tokens. Only their SHA-256 digests are stored, together
-  with a fingerprint of the access code: changing the code invalidates every session.
+- Optional global limiter (SCPISCREEN_GLOBAL_ATTEMPT_LIMIT, off by default): caps the number
+  of login attempts, all clients together, per hour. It protects against distributed guessing
+  when the client address is unavailable. Visitors holding a valid cookie are not affected.
+- Clients are stored under a keyed HMAC tag, never as a clear IP address.
+- Sessions are STATELESS: the cookie carries an expiry and a random nonce, signed with a key
+  derived from the server secret and from the access code. Nothing about a session is stored on
+  disk, so sessions survive restarts, redeployments and ephemeral file systems, as long as the
+  secret stays the same. Changing the access code or the secret signs everybody out.
+- The server secret comes from the SCPISCREEN_SERVER_SECRET environment variable (recommended,
+  at least 32 characters). Without it, a random secret is created in the state directory: that
+  only works on a host whose disk persists between restarts.
 - Authentication events go to a time-rotated log file (0600). The access code is never logged.
 
-All state lives in one JSON file protected by a thread lock and an inter-process file lock.
+Bans and counters live in one JSON file protected by a thread lock and an inter-process file lock.
 
 Command line (same SCPISCREEN_STATE_DIR as the server):
     python -m access_control bans
@@ -51,11 +58,15 @@ BAN_DURATION_SECONDS = 24 * 60 * 60
 FAILURE_WINDOW_SECONDS = 24 * 60 * 60
 SESSION_TTL_SECONDS = 365 * 24 * 60 * 60
 MAX_TOKEN_LENGTH = 128
-# Hard caps so that a flood of distinct clients cannot grow the state file without limit.
+# Hard cap so that a flood of distinct clients cannot grow the state file without limit.
 MAX_FAILURE_ENTRIES = 10_000
-MAX_SESSIONS = 10_000
 DEFAULT_LOG_RETENTION_DAYS = 90
 SECRET_BYTES = 32
+SECRET_ENV = "SCPISCREEN_SERVER_SECRET"
+SECRET_ENV_MIN_LENGTH = 32
+GLOBAL_LIMIT_ENV = "SCPISCREEN_GLOBAL_ATTEMPT_LIMIT"
+GLOBAL_WINDOW_SECONDS = 60 * 60
+SESSION_TOKEN_VERSION = "v1"
 
 _STATE_FILE_NAME = "access_state.json"
 _AUDIT_FILE_NAME = "auth.log"
@@ -63,6 +74,7 @@ _SECRET_FILE_NAME = "server_secret"
 _LOCK_FILE_NAME = "access.lock"
 _TAG_LENGTH = 32  # hex characters stored as key; the audit log shows the first 16
 _LOG_TAG_LENGTH = 16
+_MAC_LENGTH = 43
 
 _LOCK = threading.RLock()
 _AUDIT_LOGGER = logging.getLogger("scpiscreen.auth")
@@ -83,15 +95,17 @@ class AccessStateError(RuntimeError):
 class AttemptDecision:
     """Outcome of registering one login attempt.
 
-    allowed:      False when the client is already banned (the code must not be compared).
+    allowed:      False when the attempt is refused (the code must not be compared).
     remaining:    attempts left after this one; 0 means this is the last allowed attempt
                   (a wrong code now keeps the ban that was just set).
-    banned_until: ban expiry timestamp when a ban is active, otherwise None.
+    banned_until: expiry timestamp of the ban or of the global block when one is active.
+    scope:        "client" for a ban of this client, "global" for the global limiter.
     """
 
     allowed: bool
     remaining: int
     banned_until: float | None
+    scope: str = "client"
 
 
 # ---- Paths and low-level helpers ------------------------------------------------
@@ -124,10 +138,6 @@ def _as_float(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return number if math.isfinite(number) else 0.0
-
-
-def _digest(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _is_tag(value: Any) -> bool:
@@ -166,10 +176,22 @@ def _exclusive_lock() -> Iterator[None]:
 
 
 def _load_or_create_secret() -> bytes:
-    """Random server secret used for client tags and the access-code fingerprint."""
+    """Server secret used for client tags, the access-code fingerprint and session signatures.
+
+    SCPISCREEN_SERVER_SECRET wins when set: it survives restarts on any host. Otherwise a random
+    secret is stored in the state directory (needs a disk that persists).
+    """
     global _SECRET
     if _SECRET is not None:
         return _SECRET
+
+    configured = os.environ.get(SECRET_ENV, "").strip()
+    if configured:
+        if len(configured) < SECRET_ENV_MIN_LENGTH:
+            raise AccessStateError(f"{SECRET_ENV} must contain at least {SECRET_ENV_MIN_LENGTH} characters")
+        _SECRET = hashlib.sha256(configured.encode("utf-8")).digest()
+        return _SECRET
+
     directory = _ensure_state_directory()
     path = directory / _SECRET_FILE_NAME
     with _exclusive_lock():
@@ -196,6 +218,11 @@ def _load_or_create_secret() -> bytes:
             raise AccessStateError("server secret file is invalid; delete it to sign everyone out")
     _SECRET = data
     return data
+
+
+def secret_is_persistent() -> bool:
+    """True when the secret comes from the environment (stable across restarts and redeployments)."""
+    return bool(os.environ.get(SECRET_ENV, "").strip())
 
 
 def _ensure_client_key() -> bytes:
@@ -303,7 +330,7 @@ def log_event(event: str, client: str | None, **fields: object) -> None:
 
 
 def _empty_state() -> dict[str, Any]:
-    return {"failures": {}, "sessions": {}}
+    return {"failures": {}, "global": {}}
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -317,11 +344,12 @@ def _load(path: Path) -> dict[str, Any]:
     if (
         not isinstance(state, dict)
         or not isinstance(state.get("failures", {}), dict)
-        or not isinstance(state.get("sessions", {}), dict)
+        or not isinstance(state.get("global", {}), dict)
     ):
         raise AccessStateError("access state file has an invalid structure")
     state.setdefault("failures", {})
-    state.setdefault("sessions", {})
+    state.setdefault("global", {})
+    state.pop("sessions", None)  # sessions used to be stored here; they are now signed cookies
     return state
 
 
@@ -350,28 +378,12 @@ def _signature(path: Path) -> tuple[int, int, int] | None:
     return (info.st_mtime_ns, info.st_size, info.st_ino)
 
 
-def _session_expiry(entry: Any) -> float:
-    return _as_float(entry.get("expires")) if isinstance(entry, dict) else 0.0
-
-
 def _is_banned(entry: Any, now: float) -> bool:
     return isinstance(entry, dict) and _as_float(entry.get("banned_until")) > now
 
 
 def _prune(state: dict[str, Any], now: float) -> None:
-    """Drop expired data and enforce the size caps."""
-    fingerprint = _CODE_FINGERPRINT
-    sessions = {
-        digest: entry
-        for digest, entry in state["sessions"].items()
-        if _session_expiry(entry) > now
-        and (fingerprint is None or entry.get("fp") == fingerprint)
-    }
-    if len(sessions) > MAX_SESSIONS:
-        newest = sorted(sessions.items(), key=lambda item: _session_expiry(item[1]), reverse=True)
-        sessions = dict(newest[:MAX_SESSIONS])
-    state["sessions"] = sessions
-
+    """Drop expired counters and enforce the size cap."""
     kept: dict[str, Any] = {}
     for tag, entry in state["failures"].items():
         # Keys that are not tags are legacy clear-text addresses: they are dropped here.
@@ -413,13 +425,13 @@ def _update(mutator: Callable[[dict[str, Any], float], _T]) -> _T:
         now = time.time()
         _prune(state, now)
         result = mutator(state, now)
-        _prune(state, now)  # the mutation may have added an entry: re-apply the size caps
+        _prune(state, now)  # the mutation may have added an entry: re-apply the size cap
         _save(path, state)
         _CACHE.update(path=path, signature=_signature(path), state=state)
         return result
 
 
-# ---- Public API -------------------------------------------------------------------
+# ---- Public API: login attempts ---------------------------------------------------
 
 
 def access_code_matches(submitted: str, expected: str) -> bool:
@@ -428,6 +440,16 @@ def access_code_matches(submitted: str, expected: str) -> bool:
         hashlib.sha256(submitted.encode("utf-8")).digest(),
         hashlib.sha256(expected.encode("utf-8")).digest(),
     )
+
+
+def _global_attempt_limit() -> int:
+    """Maximum login attempts per hour, all clients together (0 = limiter disabled)."""
+    raw = os.environ.get(GLOBAL_LIMIT_ENV, "").strip()
+    try:
+        limit = int(raw) if raw else 0
+    except ValueError:
+        limit = 0
+    return max(0, min(limit, 100_000))
 
 
 def ban_until(client: str) -> float | None:
@@ -449,8 +471,10 @@ def register_attempt(client: str) -> AttemptDecision:
     The attempt that reaches MAX_FAILED_ATTEMPTS sets the ban immediately but is still
     evaluated; a correct code then lifts it through clear_failures(). Any further attempt
     is refused, so concurrent sessions cannot test more than MAX_FAILED_ATTEMPTS codes.
+    When the global limiter is enabled, an attempt over the hourly budget is refused first.
     """
     tag = client_tag(client)
+    limit = _global_attempt_limit()
 
     def mutate(state: dict[str, Any], now: float) -> AttemptDecision:
         entry = state["failures"].get(tag)
@@ -459,6 +483,19 @@ def register_attempt(client: str) -> AttemptDecision:
         banned_until = _as_float(entry.get("banned_until"))
         if banned_until > now:
             return AttemptDecision(False, 0, banned_until)
+
+        if limit:
+            window = state["global"]
+            started = _as_float(window.get("started"))
+            if now - started >= GLOBAL_WINDOW_SECONDS:
+                window = {"started": now, "count": 0}
+                state["global"] = window
+                started = now
+            count_so_far = int(_as_float(window.get("count")))
+            if count_so_far >= limit:
+                return AttemptDecision(False, 0, started + GLOBAL_WINDOW_SECONDS, "global")
+            window["count"] = count_so_far + 1
+
         recent = now - _as_float(entry.get("last_attempt")) < FAILURE_WINDOW_SECONDS
         count = int(_as_float(entry.get("count"))) + 1 if recent else 1
         if count >= MAX_FAILED_ATTEMPTS:
@@ -510,50 +547,42 @@ def active_bans() -> list[tuple[str, float]]:
     return _read(reader)
 
 
+# ---- Public API: signed sessions ----------------------------------------------------
+
+
+def _session_mac(payload: str) -> str:
+    """Signature of a session payload; bound to the secret AND to the current access code."""
+    key = hmac.new(
+        _load_or_create_secret(),
+        b"scpiscreen-session|" + _require_fingerprint().encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()[:_MAC_LENGTH]
+
+
 def create_session() -> str:
-    """Create a session and return the raw token (only its digest is stored)."""
-    fingerprint = _require_fingerprint()
-    token = secrets.token_urlsafe(32)
-    digest = _digest(token)
-
-    def mutate(state: dict[str, Any], now: float) -> None:
-        state["sessions"][digest] = {"expires": now + SESSION_TTL_SECONDS, "fp": fingerprint}
-
-    _update(mutate)
-    return token
+    """Return a signed session token valid for SESSION_TTL_SECONDS. Nothing is stored."""
+    expires = int(time.time()) + SESSION_TTL_SECONDS
+    payload = f"{SESSION_TOKEN_VERSION}.{expires}.{secrets.token_urlsafe(12)}"
+    return f"{payload}.{_session_mac(payload)}"
 
 
 def is_valid_session(token: str | None) -> bool:
-    """A session is valid while unexpired AND created under the current access code."""
+    """A token is valid while unexpired AND signed under the current secret and access code."""
     if not token:
         return False
     token = str(token)
-    if len(token) > MAX_TOKEN_LENGTH:
+    if len(token) > MAX_TOKEN_LENGTH or not token.isascii():
         return False
-    digest = _digest(token)
-    fingerprint = _require_fingerprint()
-
-    def reader(state: dict[str, Any], now: float) -> bool:
-        entry = state["sessions"].get(digest)
-        if not isinstance(entry, dict):
-            return False  # unknown, or a legacy entry created before code fingerprints existed
-        return _session_expiry(entry) > now and hmac.compare_digest(
-            str(entry.get("fp", "")), fingerprint
-        )
-
-    return _read(reader)
-
-
-def revoke_session(token: str | None) -> None:
-    """Invalidate one session token immediately (for a future logout button)."""
-    if not token:
-        return
-    digest = _digest(str(token))
-
-    def mutate(state: dict[str, Any], now: float) -> None:
-        state["sessions"].pop(digest, None)
-
-    _update(mutate)
+    payload, _, mac = token.rpartition(".")
+    parts = payload.split(".")
+    if len(parts) != 3 or parts[0] != SESSION_TOKEN_VERSION:
+        return False
+    if not (parts[1].isascii() and parts[1].isdigit()):
+        return False
+    if int(parts[1]) <= time.time():
+        return False
+    return hmac.compare_digest(mac.encode("ascii"), _session_mac(payload).encode("ascii"))
 
 
 # ---- Command line -----------------------------------------------------------------
