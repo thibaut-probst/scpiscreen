@@ -562,7 +562,7 @@ def validate_missing_criteria(
                     share,
                     0.0,
                     column,
-                    f"Attention : la donnée « {column} » (onglet « {tab_name} ») n'est pas disponible "
+                    f"Attention : la donnée « {column} » n'est pas disponible "
                     f"pour {missing} SCPI sur {len(rows)} ({share * 100:.0f} %). "
                     "Le calcul des scores qui l'utilisent peut être faussé.",
                 ))
