@@ -75,7 +75,7 @@ SHEET_RETRY_AFTER_SECONDS = 60
 #      reports the weight of the criterion in each profile);
 #   2. every other column of the checked tabs (only explicit "NA" cells count, so that
 #      optional columns that are simply left blank do not raise a warning).
-MISSING_CRITERION_THRESHOLD = 0.5  # flagged when strictly more than 90 % of the rows are missing
+MISSING_CRITERION_THRESHOLD = 0.5  # flagged when strictly more than 50 % of the rows are missing
 MAX_MISSING_CRITERIA_DISPLAYED = 10
 # Tabs checked, in order. A criterion is looked up in the first tab that has its column.
 CRITERIA_TABS = ("scores", "data")
@@ -505,10 +505,10 @@ def validate_missing_criteria(
             column = _find_criterion_column(rows, criterion["category"], criterion["name"])
             if column is None:
                 continue
-            #checked.add((tab, column))  # also keeps layer 2 from reporting it again
             if evaluated or not weighted:
                 continue
             evaluated = True  # only the first tab that has the column is evaluated
+            checked.add((tab, column))  # also keeps layer 2 from reporting it again
             missing = sum(1 for row in rows if _is_missing_cell(row.get(column)))
             share = missing / len(rows)
             if share > threshold:
