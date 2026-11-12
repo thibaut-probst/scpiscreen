@@ -584,7 +584,6 @@ TABLE_HEADERS = (
 # (label, column index, direction) for the mobile select; the first entry is the default order.
 MOBILE_SORT_CHOICES = (
     ("Note / 100", 2, "desc"),
-    ("Place", 0, "asc"),
     ("Décote", 3, "desc"),
     ("PGA", 4, "desc"),
     ("TRI", 5, "desc"),
