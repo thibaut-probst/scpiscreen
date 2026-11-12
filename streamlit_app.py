@@ -124,6 +124,11 @@ st.markdown(
     html[data-theme="dark"] [data-testid="stButton"] button:hover { background: #214541; }
 
     .st-key-page_navigation { margin-bottom: .35rem; }
+
+    /* Profile picker: a segmented control on wide screens, wrapping pills on narrow ones.
+       Both widgets share one value (see sync_profile_widgets). */
+    .st-key-profile_pills { display: none !important; }
+    [data-testid="stPills"] button { min-height: 2.6rem; font-weight: 600; }
     .st-key-cookie_setter { position: absolute; width: 0; height: 0; overflow: hidden; }
 
     /* Method page */
@@ -165,6 +170,8 @@ st.markdown(
 
     @media (max-width: 760px) {
         [data-testid="stMainBlockContainer"] { padding: .85rem .85rem 2.5rem; }
+        .st-key-profile_segmented { display: none !important; }
+        .st-key-profile_pills { display: block !important; }
         .masthead { margin-bottom: 1.25rem; padding: 1.2rem 1.1rem 1.3rem; border-radius: 18px; }
         .masthead-body { flex-direction: column; gap: 1rem; margin-top: 1.35rem; align-items: flex-start; }
         .masthead-title { font-size: clamp(1.8rem, 8vw, 2.35rem); }
@@ -685,6 +692,34 @@ def fact_fields(item: dict[str, Any]) -> list[tuple[str, str]]:
     return [(label, format_value(label, value)) for label, value in rows]
 
 
+# ---- Profile picker ---------------------------------------------------------
+# Two widgets show the same choice: a segmented control (wide screens) and wrapping pills
+# (narrow screens); CSS hides one of them. The canonical value is a plain session key, which
+# also survives the pages where the widgets are not rendered.
+
+PROFILE_VALUE_KEY = "profile_value"
+PROFILE_SEGMENTED_KEY = "profile_segmented"
+PROFILE_PILLS_KEY = "profile_pills"
+
+
+def sync_profile_widgets() -> str:
+    """Return the chosen profile and make both widgets show it (call before creating them)."""
+    current = st.session_state.get(PROFILE_VALUE_KEY)
+    if current not in PROFILE_ORDER:
+        current = PROFILE_ORDER[0]
+    st.session_state[PROFILE_VALUE_KEY] = current
+    st.session_state[PROFILE_SEGMENTED_KEY] = current
+    st.session_state[PROFILE_PILLS_KEY] = current
+    return current
+
+
+def handle_profile_change(widget_key: str) -> None:
+    """Callback of both widgets. Deselecting (None) is ignored: the next run restores the choice."""
+    value = st.session_state.get(widget_key)
+    if value in PROFILE_ORDER:
+        st.session_state[PROFILE_VALUE_KEY] = value
+
+
 # ---- Ranking frame builders ---------------------------------------------------
 
 def _sort_attribute(sort_value: float | None) -> str:
@@ -1020,25 +1055,33 @@ with st.container(key="page_navigation"):
     )
 
 if requested_page == PAGE_METHOD:
-    # Widgets that are not rendered lose their state: re-assign it to keep the user's choice.
-    if "profile_selector" in st.session_state:
-        st.session_state["profile_selector"] = st.session_state["profile_selector"]
     render_method_page()
     render_footer()
     st.stop()
 
+profile = sync_profile_widgets()
 profile_column, _unused_column = st.columns([1.7, 0.3])
 with profile_column:
     st.markdown('<div class="profile-label">Profil d’investissement</div>', unsafe_allow_html=True)
-    profile = st.segmented_control(
+    st.segmented_control(
         "Profil d’investissement",
         PROFILE_ORDER,
-        default=PROFILE_ORDER[0],
         label_visibility="collapsed",
-        key="profile_selector",
+        key=PROFILE_SEGMENTED_KEY,
+        on_change=handle_profile_change,
+        args=(PROFILE_SEGMENTED_KEY,),
         width="stretch",
     )
-profile = profile or PROFILE_ORDER[0]
+    st.pills(
+        "Profil d’investissement (mobile)",
+        PROFILE_ORDER,
+        label_visibility="collapsed",
+        key=PROFILE_PILLS_KEY,
+        on_change=handle_profile_change,
+        args=(PROFILE_PILLS_KEY,),
+        # Streamlit 1.63+: a control placed directly in st.columns does not wrap by default.
+        wrap=True,
+    )
 
 view: dict[str, Any] = {"rows_html": [], "ids": frozenset(), "details_html": "", "warnings": []}
 if not load_error:

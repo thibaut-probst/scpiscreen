@@ -5,7 +5,7 @@ description = "Classement des SCPI"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "streamlit>=1.61.1",
+    "streamlit>=1.63.0",
 ]
 
 [tool.uv]
