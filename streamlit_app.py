@@ -129,7 +129,7 @@ st.markdown(
        Both widgets share one value (see sync_profile_widgets). */
     .st-key-profile_pills { display: none !important; }
     [data-testid="stPills"] button { min-height: 2.6rem; font-weight: 600; }
-    .st-key-cookie_setter { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .st-key-cookie_setter, .st-key-handoff_probe { position: absolute; width: 0; height: 0; overflow: hidden; }
 
     /* Method page */
     .method-intro { max-width: 52rem; margin: .2rem 0 1.2rem; color: var(--muted); font-size: .98rem; line-height: 1.6; }
@@ -584,6 +584,7 @@ TABLE_HEADERS = (
 # (label, column index, direction) for the mobile select; the first entry is the default order.
 MOBILE_SORT_CHOICES = (
     ("Note / 100", 2, "desc"),
+    ("Place", 0, "asc"),
     ("Décote", 3, "desc"),
     ("PGA", 4, "desc"),
     ("TRI", 5, "desc"),

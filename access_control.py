@@ -290,6 +290,13 @@ def _configure_audit_log() -> None:
     global _LOGS_PURGED
     if _AUDIT_LOGGER.handlers:
         return
+    # Events also go to stderr, so that they show in the logs of hosts without file access
+    # (for example "Manage app" on Streamlit Community Cloud).
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(logging.Formatter("scpiscreen.auth %(message)s"))
+    _AUDIT_LOGGER.addHandler(stream_handler)
+    _AUDIT_LOGGER.setLevel(logging.INFO)
+    _AUDIT_LOGGER.propagate = False
     days = _log_retention_days()
     try:
         directory = _ensure_state_directory()
@@ -312,8 +319,6 @@ def _configure_audit_log() -> None:
         return
     handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     _AUDIT_LOGGER.addHandler(handler)
-    _AUDIT_LOGGER.setLevel(logging.INFO)
-    _AUDIT_LOGGER.propagate = False
 
 
 def log_event(event: str, client: str | None, **fields: object) -> None:
@@ -567,22 +572,32 @@ def create_session() -> str:
     return f"{payload}.{_session_mac(payload)}"
 
 
-def is_valid_session(token: str | None) -> bool:
-    """A token is valid while unexpired AND signed under the current secret and access code."""
+def session_status(token: str | None) -> str:
+    """Why a session token is (not) accepted: absent, malformed, bad_signature, expired or valid.
+
+    bad_signature also means "signed under another secret or another access code".
+    """
     if not token:
-        return False
+        return "absent"
     token = str(token)
     if len(token) > MAX_TOKEN_LENGTH or not token.isascii():
-        return False
+        return "malformed"
     payload, _, mac = token.rpartition(".")
     parts = payload.split(".")
     if len(parts) != 3 or parts[0] != SESSION_TOKEN_VERSION:
-        return False
+        return "malformed"
     if not (parts[1].isascii() and parts[1].isdigit()):
-        return False
+        return "malformed"
+    if not hmac.compare_digest(mac.encode("ascii"), _session_mac(payload).encode("ascii")):
+        return "bad_signature"
     if int(parts[1]) <= time.time():
-        return False
-    return hmac.compare_digest(mac.encode("ascii"), _session_mac(payload).encode("ascii"))
+        return "expired"
+    return "valid"
+
+
+def is_valid_session(token: str | None) -> bool:
+    """A token is valid while unexpired AND signed under the current secret and access code."""
+    return session_status(token) == "valid"
 
 
 # ---- Command line -----------------------------------------------------------------

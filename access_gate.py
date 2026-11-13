@@ -29,6 +29,10 @@ ACCESS_CODE_ENV = "SCPISCREEN_ACCESS_CODE"
 INSECURE_HTTP_ENV = "SCPISCREEN_ALLOW_INSECURE_HTTP"
 # The __Host- prefix makes browsers accept the cookie only if it is Secure, has Path=/ and no Domain.
 AUTH_COOKIE_NAME = "__Host-scpiscreen_access"
+# Over plain HTTP (a local run on http://localhost) Firefox and Safari refuse Secure and __Host-
+# cookies, so a plain cookie is used there. Both names are read; HTTPS deployments never use it.
+PLAIN_COOKIE_NAME = "scpiscreen_access"
+AUTH_COOKIE_NAMES = (AUTH_COOKIE_NAME, PLAIN_COOKIE_NAME)
 AUTH_COOKIE_TTL_SECONDS = access_control.SESSION_TTL_SECONDS
 # Lax (not Strict): a Strict cookie is not sent when the app is opened from another site
 # (a link in a message, an embedding page), which looked like "the cookie does not work".
@@ -40,6 +44,13 @@ DISPLAY_TIMEZONE = "Europe/Paris"
 SESSION_FLAG = "access_granted"
 PENDING_COOKIE_KEY = "pending_session_cookie"
 COOKIE_LOGGED_KEY = "cookie_state_logged"
+# Temporary diagnostics: set SCPISCREEN_DIAGNOSTICS=1 on the server, then open the site with ?diag=1.
+DIAGNOSTICS_ENV = "SCPISCREEN_DIAGNOSTICS"
+# Some hosts (Streamlit Community Cloud) do not pass JavaScript-written cookies to the server on
+# the WebSocket connection, so st.context.cookies stays empty there. The browser still has the
+# cookie: a probe frame reads it and reloads the page once with the token in this query parameter.
+HANDOFF_PARAM = "sat"
+HANDOFF_TRIED_KEY = "handoff_tried"
 
 
 # ---- Helpers ----------------------------------------------------------------------
@@ -103,15 +114,35 @@ def _connection_is_insecure() -> bool:
 
 
 def _read_auth_cookie() -> str | None:
-    """Session cookie sent by the browser with the connection, read on the server."""
+    """Session cookie sent by the browser with the connection, read on the server.
+
+    Both cookie names are looked at; a valid token wins over a stale one (for example a cookie
+    written by an older version of the app that the browser could not overwrite).
+    """
     cookies = getattr(st.context, "cookies", None)
     if cookies is None:
         return None
+    candidates: list[str] = []
+    for name in AUTH_COOKIE_NAMES:
+        try:
+            value = cookies.get(name)
+        except Exception:
+            continue
+        if value:
+            candidates.append(str(value))
+    for value in candidates:
+        if access_control.session_status(value) == "valid":
+            return value
+    return candidates[0] if candidates else None
+
+
+def _page_is_https() -> bool:
+    """False only when the server clearly sees a plain-HTTP page (the default is HTTPS)."""
     try:
-        value = cookies.get(AUTH_COOKIE_NAME)
+        url = str(getattr(st.context, "url", "") or "")
     except Exception:
-        return None
-    return str(value) if value else None
+        return True
+    return urlsplit(url).scheme != "http" if url else True
 
 
 def _fallback_ban_until() -> float | None:
@@ -162,10 +193,16 @@ def _persist_cookie() -> None:
     token = st.session_state.get(PENDING_COOKIE_KEY)
     if not token:
         return
-    cookie = (
-        f"{AUTH_COOKIE_NAME}={token}; Max-Age={AUTH_COOKIE_TTL_SECONDS}; "
-        f"Path=/; Secure; SameSite={AUTH_COOKIE_SAMESITE}"
-    )
+    if _page_is_https():
+        cookie = (
+            f"{AUTH_COOKIE_NAME}={token}; Max-Age={AUTH_COOKIE_TTL_SECONDS}; "
+            f"Path=/; Secure; SameSite={AUTH_COOKIE_SAMESITE}"
+        )
+    else:
+        cookie = (
+            f"{PLAIN_COOKIE_NAME}={token}; Max-Age={AUTH_COOKIE_TTL_SECONDS}; "
+            f"Path=/; SameSite={AUTH_COOKIE_SAMESITE}"
+        )
     script = (
         "<script>(function(){var c=" + json.dumps(cookie) + ";"
         "try{window.parent.document.cookie=c;}catch(e){"
@@ -238,18 +275,144 @@ def _render_login(access_code: str, client_key: str | None) -> None:
 # ---- Public entry point -----------------------------------------------------------
 
 
+def _received_cookie_names() -> list[str]:
+    """Names (never values) of the cookies the browser sent with the connection."""
+    cookies = getattr(st.context, "cookies", None)
+    if cookies is None:
+        return []
+    try:
+        return sorted(str(name) for name in cookies.keys())
+    except Exception:
+        return []
+
+
 def _resume_session_from_cookie(client_key: str | None) -> None:
     """Grant access from a valid cookie, and log (once per session) why a visitor was not resumed."""
-    cookie = _read_auth_cookie()
-    if cookie is not None and access_control.is_valid_session(cookie):
+    status = access_control.session_status(_read_auth_cookie())
+    if status == "valid":
         st.session_state[SESSION_FLAG] = True
         access_control.log_event("session_resumed", client_key)
         return
     if not st.session_state.get(COOKIE_LOGGED_KEY):
         st.session_state[COOKIE_LOGGED_KEY] = True
-        # cookie_absent: the browser did not send it (never written, expired, blocked, not sent).
-        # cookie_rejected: it was sent but is not valid (secret or access code changed, expired, tampered).
-        access_control.log_event("cookie_absent" if cookie is None else "cookie_rejected", client_key)
+        # cookie_absent: the browser did not send it (never written, expired, blocked, not sent);
+        #   received= lists the cookies that did arrive.
+        # cookie_rejected: it was sent but refused: reason=bad_signature (the secret or the access
+        #   code changed), expired or malformed.
+        access_control.log_event(
+            "cookie_absent" if status == "absent" else "cookie_rejected",
+            client_key,
+            reason=status,
+            received=",".join(_received_cookie_names()) or "none",
+        )
+
+
+def _try_url_handoff(client_key: str | None) -> None:
+    """Accept a session token handed over in the URL by the probe frame (see HANDOFF_PARAM).
+
+    The parameter is removed from the URL at once, whatever the outcome. A valid token also
+    gets a fresh cookie (new one-year expiry), so regular visitors never expire.
+    """
+    token = st.query_params.get(HANDOFF_PARAM)
+    if token is None:
+        return
+    try:
+        del st.query_params[HANDOFF_PARAM]
+    except KeyError:
+        pass
+    st.session_state[HANDOFF_TRIED_KEY] = True  # the probe never runs twice in one session
+    status = access_control.session_status(str(token))
+    if status == "valid":
+        st.session_state[SESSION_FLAG] = True
+        st.session_state[PENDING_COOKIE_KEY] = access_control.create_session()
+        access_control.log_event("session_resumed", client_key, via="url")
+    else:
+        access_control.log_event("handoff_rejected", client_key, reason=status)
+
+
+def _handoff_probe_script(cookie_names: tuple[str, ...] = AUTH_COOKIE_NAMES) -> str:
+    """Runs in a frame of the login page: if the browser holds a session cookie, reload with it.
+
+    Only tokens of the current format are considered, so a stale cookie never triggers a reload.
+    """
+    prefix = access_control.SESSION_TOKEN_VERSION + "."
+    return (
+        "<script>(function(){"
+        "var names=" + json.dumps(list(cookie_names)) + ",prefix=" + json.dumps(prefix) + ";"
+        "try{"
+        "var doc=window.parent.document,loc=window.parent.location,url=new URL(loc.href);"
+        "if(url.searchParams.has(" + json.dumps(HANDOFF_PARAM) + ")){return;}"
+        "var token=null;"
+        "doc.cookie.split('; ').forEach(function(pair){"
+        "names.forEach(function(name){"
+        "if(pair.indexOf(name+'=')===0){var value=pair.substring(name.length+1);"
+        "if(value.indexOf(prefix)===0){token=value;}}"
+        "});});"
+        "if(!token){return;}"
+        # Hide the login form while the page reloads, so returning visitors do not see it flash.
+        "var style=doc.createElement('style');"
+        "style.textContent='[data-testid=\"stMain\"]{visibility:hidden}';"
+        "doc.head.appendChild(style);"
+        "url.searchParams.set(" + json.dumps(HANDOFF_PARAM) + ",token);"
+        "loc.replace(url.toString());"
+        "}catch(e){/* the login form stays usable */}"
+        "})();</script>"
+    )
+
+
+def _render_handoff_probe() -> None:
+    if st.session_state.get(HANDOFF_TRIED_KEY) or HANDOFF_PARAM in st.query_params:
+        return
+    with st.container(key="handoff_probe"):
+        render_html_frame(_handoff_probe_script(), height=0, scrolling=False)
+
+
+def _diagnostics_requested() -> bool:
+    return os.environ.get(DIAGNOSTICS_ENV, "").strip() == "1" and st.query_params.get("diag") == "1"
+
+
+def _diagnostics_script() -> str:
+    """Report written inside a frame: what the BROWSER sees and allows (cookie names only)."""
+    return """<body style="margin:0;font:13px/1.5 ui-monospace,Menlo,monospace;color:#152a40"><pre id="out" style="margin:0;white-space:pre-wrap"></pre><script>(function () {
+var out = [];
+function add(label, value) { out.push(label + " : " + value); }
+var cookieNames = %s, doc = null;
+try { doc = window.parent.document; add("accès au document de la page", "oui"); }
+catch (e) { add("accès au document de la page", "NON (" + e.name + ")"); }
+try { add("protocole de la page", window.parent.location.protocol); } catch (e) { /* ignore */ }
+add("cookies activés (navigateur)", String(navigator.cookieEnabled));
+add("contexte sécurisé", String(window.isSecureContext));
+try { add("page affichée dans un cadre", String(window.parent !== window.parent.top)); }
+catch (e) { add("page affichée dans un cadre", "oui, d'une autre origine (" + e.name + ")"); }
+if (doc) {
+    var names = doc.cookie ? doc.cookie.split("; ").map(function (c) { return c.split("=")[0]; }) : [];
+    add("cookies visibles par le navigateur", names.length ? names.join(", ") : "aucun");
+    add("cookie de session présent", String(cookieNames.some(function (n) { return names.indexOf(n) !== -1; })));
+    try {
+        doc.cookie = "__Host-scpiscreen_test=1; Max-Age=60; Path=/; Secure; SameSite=Lax";
+        add("écriture d'un cookie de test", String(doc.cookie.indexOf("__Host-scpiscreen_test=") !== -1));
+    } catch (e) { add("écriture d'un cookie de test", "NON (" + e.name + ")"); }
+}
+document.getElementById("out").textContent = out.join("\\n");
+})();</script></body>""" % json.dumps(list(AUTH_COOKIE_NAMES))
+
+
+def _render_diagnostics(client_key: str | None) -> None:
+    """What the server and the browser each see about the session cookie. Off unless enabled."""
+    try:
+        url = str(getattr(st.context, "url", "") or "")
+    except Exception:
+        url = ""
+    lines = [
+        f"cookies reçus par le serveur   : {', '.join(_received_cookie_names()) or 'aucun'}",
+        f"cookie de session (serveur)    : {access_control.session_status(_read_auth_cookie())}",
+        f"adresse client exposée         : {'oui' if client_key else 'non'}",
+        f"secret serveur stable (env)    : {'oui' if access_control.secret_is_persistent() else 'non'}",
+        f"schéma de l'URL vue du serveur : {urlsplit(url).scheme or 'inconnu'}",
+    ]
+    st.warning("Diagnostic temporaire (SCPISCREEN_DIAGNOSTICS=1) : à désactiver après usage.")
+    st.code("\n".join(lines), language=None)
+    render_html_frame(_diagnostics_script(), height=210, scrolling=True)
 
 
 def require_access() -> None:
@@ -268,11 +431,15 @@ def require_access() -> None:
     client_key = current_client_key()  # None when Streamlit does not expose the address
     try:
         access_control.configure(access_code)
+        if _diagnostics_requested():
+            _render_diagnostics(client_key)
         banned_until = (
             access_control.ban_until(client_key) if client_key is not None else _fallback_ban_until()
         )
         if banned_until is None and not st.session_state.get(SESSION_FLAG, False):
             _resume_session_from_cookie(client_key)
+            if not st.session_state.get(SESSION_FLAG, False):
+                _try_url_handoff(client_key)
     except access_control.AccessStateError:
         logger.exception("Access state unreadable")
         _unavailable()
@@ -285,6 +452,7 @@ def require_access() -> None:
         st.stop()
 
     if not st.session_state.get(SESSION_FLAG, False):
+        _render_handoff_probe()
         _render_login(access_code, client_key)
         if not st.session_state.get(SESSION_FLAG, False):
             st.stop()
