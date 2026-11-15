@@ -17,6 +17,7 @@ from scpi_data import (
     PROFILE_ORDER,
     SHEET_CACHE_TTL_SECONDS,
     WEIGHTS_STORE,
+    VERSION_STORE,
     SheetLoadError,
     build_rankings,
     build_weight_matrix,
@@ -1459,16 +1460,20 @@ st.markdown(
 
 def render_footer() -> None:
     """Render the license and liability notice."""
+    version_data = VERSION_STORE.get().value
+    data_date = version_data[0][1].split()[1]
+    tool_date = version_data[1][1]
     st.markdown(
-        "**Licence Open Source (GNU GPL v3) :** Cet outil (code source et formules de calcul) est distribué sous licence libre GNU GPL v3. "
-        "Toute redistribution de ce projet ou de ses œuvres dérivées doit être effectuée sous cette même licence, "
-        "conserver l'accès libre au code source et aux formules, et maintenir les crédits d'origine. "
-        "Les données publiques de marché utilisées proviennent de la [base de données publique](https://docs.google.com/spreadsheets/d/1McJtTdsId_xjdpAV7WQbj6COlz5yCOOIiJsIj45tpcU/) de [Louve Invest](https://www.louveinvest.com/scpi/liste-scpi), réutilisée conformémment aux conditions d'utilisation communiquées par son éditeur. Les scores, pondérations, indicateurs complémentaires et classements sont des créations indépendantes."
+        "**Licence Open Source (GNU GPL v3) :** Cet outil ([code source](https://github.com/thibaut-probst/scpiscreen) et [formules de calcul](https://docs.google.com/spreadsheets/d/10RwJl0A2dvoHjY6LmOFQvT7nghF3-n73hf-Aa9FJBtE/)) est distribué sous licence libre GNU GPL v3. "
+        "Toute redistribution doit respecter les termes de la GPL v3 (code source accessible, mention des modifications, conservation des mentions de droits d’auteur). "
+        "Les données publiques de marché utilisées proviennent de la [base de données publique](https://docs.google.com/spreadsheets/d/1McJtTdsId_xjdpAV7WQbj6COlz5yCOOIiJsIj45tpcU/) de [Louve Invest](https://www.louveinvest.com/scpi/liste-scpi), réutilisée conformément aux conditions d'utilisation communiquées par son éditeur. Les scores, pondérations, indicateurs complémentaires et classements sont des créations indépendantes. "
         "Cet outil est indépendant de Louve Invest et ne constitue ni un service officiel ni un partenariat avec cette société.\n\n"
-        "**Avertissement de responsabilité :** Cet outil est un support quantitatif d'analyse et de décision fondé sur des données publiques et des modèles mathématiques de pondération pour calculer des scores et établir des classements selon une méthodologie propre à l'application. "
+        "**Avertissement de responsabilité :** Cet outil est un support quantitatif d'analyse fondé sur des données publiques et des modèles mathématiques de pondération pour calculer des scores et établir des classements selon une méthodologie propre à l'application. "
         "Les scores et classements sont fournis à titre exclusivement informatif. Cela ne constitue en aucun cas un conseil en investissement ni une activité de démarchage financier au sens de la réglementation de l'AMF. Il n'a donc pas vocation à fournir un conseil personnalisé. "
         "Malgré le soin apporté aux calculs, aucune garantie n'est donnée quant à l'exhaustivité ou à l'exactitude des informations présentées. "
-        "Investir en SCPI comporte des risques, notamment de perte en capital. Les performances passées ne préjugent pas des performances futures."
+        "Investir en SCPI comporte des risques, notamment de perte en capital. Les performances passées ne préjugent pas des performances futures.\n\n"
+        f"Dernière mise à jour de l'outil : {data_date}.\n\n"
+        f"Dernière mise à jour des données : {tool_date}."
     )
 
 

@@ -31,6 +31,8 @@ WEIGHTS_WORKSHEET = "Pondérations"
 WEIGHTS_HEADER_ROWS = 2
 UNCATEGORIZED_LABEL = "Autres critères"
 
+VERSION_WORKSHEET = "Version"
+
 # Header of the Data column whose values are the SCPI names written in the Scores tab
 # ("Catégorie SCPI"). Leave empty to detect it automatically: the Data column (the "SCPI"
 # column by default) whose values match the most Scores names is used.
@@ -603,6 +605,16 @@ def load_weights_sheet(sheet_id: str, worksheet: str = WEIGHTS_WORKSHEET) -> lis
         raise SheetLoadError(f"L’onglet « {worksheet} » est vide ou mal nommé.")
     return rows
 
+def load_version_sheet(sheet_id: str, worksheet: str = VERSION_WORKSHEET) -> list[list[str]]:
+    """Load the weights tab as raw rows (the header labels repeat, so no DictReader)."""
+    content = _read_google_csv(sheet_id, worksheet, header_rows=WEIGHTS_HEADER_ROWS)
+    try:
+        rows = [[cell.strip() for cell in row] for row in csv.reader(io.StringIO(content))]
+    except csv.Error as error:
+        raise SheetLoadError(f"L’onglet « {worksheet} » n’est pas un CSV valide.") from error
+    if not any(any(row) for row in rows):
+        raise SheetLoadError(f"L’onglet « {worksheet} » est vide ou mal nommé.")
+    return rows
 
 def _split_category(label: str) -> tuple[str, str]:
     """Split a merged "Category Criterion" header label into its two parts."""
@@ -803,4 +815,10 @@ WEIGHTS_STORE: TTLStore[list[list[str]]] = TTLStore(
     ttl=SHEET_CACHE_TTL_SECONDS,
     retry_after=SHEET_RETRY_AFTER_SECONDS,
     name="weights",
+)
+VERSION_STORE: TTLStore[list[list[str]]] = TTLStore(
+    lambda: load_version_sheet(SHEET_ID),
+    ttl=SHEET_CACHE_TTL_SECONDS,
+    retry_after=SHEET_RETRY_AFTER_SECONDS,
+    name="version",
 )
