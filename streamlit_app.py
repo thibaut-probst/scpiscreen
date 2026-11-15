@@ -2,6 +2,7 @@ import base64
 import hashlib
 import html
 import logging
+import math
 import re
 from typing import Any
 
@@ -254,17 +255,85 @@ html, body { margin: 0; padding: 0; background: transparent; color: var(--ink); 
 .app { display: flow-root; padding-bottom: 8px; }
 .app.show-detail .list { display: none; }
 
-/* Toolbar: search field (and the cards / table switch on narrow screens) */
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .7rem; margin: 0 0 .9rem; }
-.search-field { position: relative; flex: 1 1 16rem; max-width: 26rem; }
+/* Toolbar: filters button, search field (and the cards / table switch on narrow screens) */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .7rem; margin: 0 0 .8rem; }
+.search-field { position: relative; flex: 1 1 16rem; max-width: 26rem; margin-left: auto; }
 #search { width: 100%; min-height: 2.75rem; padding: .5rem 2.5rem .5rem .85rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-family: inherit; font-size: .9rem; -webkit-appearance: none; appearance: none; }
 #search::-webkit-search-cancel-button { display: none; }
-#search:focus-visible, .view-toggle button:focus-visible, .ranking-table th:focus-visible, .company-link:focus-visible, .back:focus-visible, #mobile-sort:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+button:focus-visible, input:focus-visible, select:focus-visible, .ranking-table th:focus-visible, .company-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 #search-clear { position: absolute; top: 50%; right: .35rem; min-width: 1.9rem; min-height: 1.9rem; padding: 0 .5rem; transform: translateY(-50%); border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: .85rem; line-height: 1; cursor: pointer; }
 #search-clear:hover, #search-clear:focus-visible { color: var(--ink); background: var(--blue-pale); }
 .view-toggle { display: none; gap: .3rem; padding: .25rem; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); }
 .view-toggle button { min-height: 2.3rem; padding: .3rem .95rem; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-family: inherit; font-size: .8rem; font-weight: 650; cursor: pointer; }
 .view-toggle button[aria-pressed="true"] { color: var(--blue); background: var(--blue-pale); }
+
+.filters-button { display: inline-flex; align-items: center; gap: .55rem; min-height: 2.75rem; padding: .5rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-family: inherit; font-size: .88rem; font-weight: 650; cursor: pointer; transition: background-color .18s ease, border-color .18s ease, color .18s ease; }
+.filters-button svg { width: 1.05rem; height: 1.05rem; flex: 0 0 auto; }
+.filters-button:hover { background: var(--blue-pale); border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); }
+.filters-button[aria-expanded="true"] { color: var(--blue); background: var(--blue-pale); border-color: color-mix(in srgb, var(--blue) 50%, var(--line)); }
+.filters-badge { min-width: 1.4rem; height: 1.4rem; padding: 0 .4rem; border-radius: 999px; background: var(--blue); color: var(--surface); font-size: .72rem; font-weight: 700; line-height: 1.4rem; text-align: center; font-variant-numeric: tabular-nums; }
+
+/* Result counter and active filters */
+.filters-summary { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .9rem; margin: 0 0 .9rem; color: var(--muted); font-size: .84rem; }
+#result-count strong { color: var(--ink); font-size: .95rem; font-variant-numeric: tabular-nums; }
+.active-filters { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.active-chip { display: inline-flex; align-items: center; gap: .15rem; padding: .18rem .25rem .18rem .7rem; border-radius: 999px; background: var(--blue-pale); color: var(--blue); font-size: .78rem; font-weight: 650; animation: pop .18s ease; }
+.active-chip button { display: inline-flex; align-items: center; justify-content: center; width: 1.45rem; height: 1.45rem; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; font-size: .72rem; cursor: pointer; }
+.active-chip button:hover { background: color-mix(in srgb, var(--blue) 18%, transparent); }
+.link-button { padding: .25rem .4rem; border: 0; border-radius: 6px; background: transparent; color: var(--blue); font-family: inherit; font-size: .78rem; font-weight: 650; cursor: pointer; }
+.link-button:hover { text-decoration: underline; text-underline-offset: 3px; }
+@keyframes pop { from { transform: scale(.92); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+/* Filters panel: opens with a height transition */
+.filters-panel { display: grid; grid-template-rows: 0fr; margin: 0; transition: grid-template-rows .28s ease, margin .28s ease; }
+.filters-panel.open { grid-template-rows: 1fr; margin: 0 0 1rem; }
+.filters-inner { min-height: 0; overflow: hidden; visibility: hidden; transition: visibility .28s; }
+.filters-panel.open .filters-inner { visibility: visible; }
+.filters-body { padding: 1.15rem 1.25rem 1.3rem; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); }
+.filters-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+.filters-title { color: var(--ink); font-family: 'Fraunces', Georgia, serif; font-size: 1.2rem; letter-spacing: -.03em; }
+.filters-sub { margin-top: .15rem; color: var(--muted); font-size: .78rem; }
+.filters-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; }
+.filter-card { padding: .85rem 1rem .8rem; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-soft); transition: border-color .18s ease, background-color .18s ease; }
+.filter-card.is-active { border-color: color-mix(in srgb, var(--blue) 55%, var(--line)); background: color-mix(in srgb, var(--blue) 7%, var(--surface-soft)); }
+.filter-card.is-disabled { opacity: .55; }
+.filter-card-top { display: flex; align-items: baseline; justify-content: space-between; gap: .6rem; }
+.filter-card-top label { color: var(--muted); font-size: .66rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.filter-value { color: var(--muted); font-size: .95rem; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.filter-card.is-active .filter-value { color: var(--blue); }
+.filter-card-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: .68rem; font-variant-numeric: tabular-nums; }
+.filter-card-hint { margin-top: .3rem; color: var(--muted); font-size: .7rem; }
+
+/* Range slider */
+input[type="range"] { --fill: 0%; display: block; width: 100%; height: 1.5rem; margin: .35rem 0 .1rem; padding: 0; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
+input[type="range"]:disabled { cursor: not-allowed; }
+input[type="range"]::-webkit-slider-runnable-track { height: 6px; border-radius: 999px; background: linear-gradient(to right, var(--blue) var(--fill), var(--line) var(--fill)); }
+input[type="range"]::-moz-range-track { height: 6px; border-radius: 999px; background: var(--line); }
+input[type="range"]::-moz-range-progress { height: 6px; border-radius: 999px; background: var(--blue); }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 1.2rem; height: 1.2rem; margin-top: calc((6px - 1.2rem) / 2); border: 2px solid var(--blue); border-radius: 50%; background: var(--surface); box-shadow: 0 2px 6px rgba(20, 48, 67, .22); transition: transform .15s ease; }
+input[type="range"]::-moz-range-thumb { box-sizing: border-box; width: 1.2rem; height: 1.2rem; border: 2px solid var(--blue); border-radius: 50%; background: var(--surface); box-shadow: 0 2px 6px rgba(20, 48, 67, .22); }
+input[type="range"]:not(:disabled):active::-webkit-slider-thumb { transform: scale(1.15); }
+
+/* Multi-select chips (sectors, regions) */
+.filters-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; margin-top: .8rem; }
+.filter-group { padding: .9rem 1rem 1rem; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-soft); }
+.filter-group-top { display: flex; align-items: center; justify-content: space-between; gap: .6rem; margin-bottom: .6rem; }
+.filter-group-title { color: var(--muted); font-size: .66rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.chip-group { display: flex; flex-wrap: wrap; gap: .45rem; }
+.chip { display: inline-flex; align-items: center; gap: .45rem; min-height: 2.15rem; padding: .2rem .75rem; border: 1px solid var(--chip-line); border-radius: 999px; background: var(--surface); color: var(--chip-ink); font-family: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; transition: background-color .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease; }
+.chip:hover { border-color: var(--blue); }
+.chip[aria-pressed="true"] { border-color: var(--blue); background: var(--blue-pale); color: var(--blue); }
+.chip[aria-pressed="true"] .chip-label::before { content: "✓ "; }
+.chip-count { color: var(--muted); font-size: .7rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.chip[aria-pressed="true"] .chip-count { color: inherit; opacity: .8; }
+.chip.is-empty:not([aria-pressed="true"]) { opacity: .45; }
+.chip-group.collapsed .chip:nth-child(n+13):not([aria-pressed="true"]) { display: none; }
+
+.filters-done { display: none; width: 100%; min-height: 3rem; margin-top: 1rem; border: 0; border-radius: 12px; background: var(--blue); color: var(--surface); font-family: inherit; font-size: .92rem; font-weight: 700; cursor: pointer; }
+
+@media (prefers-reduced-motion: reduce) {
+    .filters-panel, .filters-inner, .active-chip { transition: none; animation: none; }
+}
 
 /* Table */
 .scroll { width: 100%; overflow: auto; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow); }
@@ -318,10 +387,19 @@ html, body { margin: 0; padding: 0; background: transparent; color: var(--ink); 
 .fact-value { margin-top: .25rem; color: var(--ink); font-size: .9rem; font-weight: 600; line-height: 1.45; }
 
 @media (max-width: 760px) {
-    .toolbar { flex-direction: column; align-items: stretch; }
-    .search-field { flex: 0 0 auto; max-width: none; }
-    .view-toggle { display: flex; }
+    .toolbar { gap: .6rem; }
+    .filters-button { flex: 1 1 0; justify-content: center; }
+    .view-toggle { display: flex; flex: 1 1 0; }
     .view-toggle button { flex: 1; }
+    .search-field { order: 3; flex: 1 1 100%; max-width: none; margin-left: 0; }
+    .filters-body { padding: 1rem; }
+    .filters-groups { grid-template-columns: 1fr; }
+    .filters-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+    .filter-card { padding: .7rem .8rem .65rem; border-radius: 12px; }
+    .filter-card-top { flex-direction: column; align-items: flex-start; gap: .1rem; }
+    .filter-card-top label { font-size: .6rem; line-height: 1.25; }
+    .filter-value { font-size: .88rem; }
+    .filters-done { display: block; }
     .view-cards .mobile-sort { display: flex; }
     .view-table .ranking-table th, .view-table .ranking-table td { padding: .75rem .8rem; }
     .view-table .ranking-table td.cell-scpi { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line); }
@@ -361,17 +439,33 @@ html, body { margin: 0; padding: 0; background: transparent; color: var(--ink); 
 
 FRAME_CSS = _FRAME_CSS_TEMPLATE.replace("__DARK_BLOCK__", _DARK_BLOCK)
 
-FRAME_JS = """
+FRAME_JS = r"""
 (function () {
-    var app = document.querySelector('.app');
-    var table = document.getElementById('ranking');
-    var select = document.getElementById('mobile-sort');
-    var search = document.getElementById('search');
-    var clearButton = document.getElementById('search-clear');
-    var emptyRow = document.getElementById('empty-row');
-    var headers = table ? Array.prototype.slice.call(table.querySelectorAll('th.sort-btn')) : [];
-    var viewButtons = Array.prototype.slice.call(document.querySelectorAll('[data-view]'));
-    var lastOpener = null;
+    'use strict';
+    const STORAGE_KEY = 'scpiscreen.ranking.v1';
+    const EPSILON = 1e-9;
+    const GROUPS = ['sectors', 'regions'];
+    const $ = (selector, root) => (root || document).querySelector(selector);
+    const $$ = (selector, root) => Array.prototype.slice.call((root || document).querySelectorAll(selector));
+
+    const app = $('.app');
+    const table = document.getElementById('ranking');
+    const select = document.getElementById('mobile-sort');
+    const search = document.getElementById('search');
+    const clearButton = document.getElementById('search-clear');
+    const emptyRow = document.getElementById('empty-row');
+    const panel = document.getElementById('filters-panel');
+    const toggle = document.getElementById('filters-toggle');
+    const badge = document.getElementById('filters-badge');
+    const counter = document.getElementById('result-count');
+    const activeBox = document.getElementById('active-filters');
+    const doneButton = document.getElementById('filters-done');
+    const headers = table ? $$('th.sort-btn', table) : [];
+    const viewButtons = $$('[data-view]');
+    const sliders = $$('input[data-num]');
+    const chips = $$('.chip[data-group]');
+    let lastOpener = null;
+    let restoring = true;
 
     // The frame is as tall as its content: no inner scrollbar, no empty space. The frame has the
     // same origin as the page, so it can resize its own <iframe>. Streamlit fixes the height of the
@@ -380,11 +474,11 @@ FRAME_JS = """
     // given by the server is kept.
     function fitHeight() {
         try {
-            var frame = window.frameElement;
+            const frame = window.frameElement;
             if (!frame || !app) { return; }
-            var height = Math.ceil(app.getBoundingClientRect().height) + 'px';
-            var limit = frame.closest('[data-testid="stElementContainer"], .element-container, .stElementContainer');
-            var node = frame;
+            const height = Math.ceil(app.getBoundingClientRect().height) + 'px';
+            const limit = frame.closest('[data-testid="stElementContainer"], .element-container, .stElementContainer');
+            let node = frame;
             while (node) {
                 node.style.height = height;
                 if (node === limit || !limit) { break; }
@@ -398,25 +492,25 @@ FRAME_JS = """
     }
 
     function normalize(text) {
-        return String(text).normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase()
-            .replace(/\\u0153/g, 'oe').replace(/\\u00e6/g, 'ae').replace(/[\\u2018\\u2019\\u02bc]/g, "'")
-            .replace(/\\s+/g, ' ').trim();
+        return String(text).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+            .replace(/\u0153/g, 'oe').replace(/\u00e6/g, 'ae').replace(/[\u2018\u2019\u02bc]/g, "'")
+            .replace(/\s+/g, ' ').trim();
     }
 
-    // Missing values (empty data-sort) always go last, whatever the direction.
+    // ---- Sorting: missing values (empty data-sort) always go last, whatever the direction.
     function sortRows(column, type, direction) {
         if (!table) { return; }
-        var tbody = table.tBodies[0];
-        var rows = Array.prototype.slice.call(tbody.rows).filter(function (row) { return row !== emptyRow; });
-        rows.sort(function (a, b) {
-            var left = a.cells[column].getAttribute('data-sort') || '';
-            var right = b.cells[column].getAttribute('data-sort') || '';
-            var result;
+        const tbody = table.tBodies[0];
+        const rows = Array.prototype.slice.call(tbody.rows).filter(row => row !== emptyRow);
+        rows.sort((a, b) => {
+            const left = a.cells[column].getAttribute('data-sort') || '';
+            const right = b.cells[column].getAttribute('data-sort') || '';
+            let result;
             if (type === 'num') {
-                var leftNumber = parseFloat(left);
-                var rightNumber = parseFloat(right);
-                var leftMissing = isNaN(leftNumber);
-                var rightMissing = isNaN(rightNumber);
+                const leftNumber = parseFloat(left);
+                const rightNumber = parseFloat(right);
+                const leftMissing = isNaN(leftNumber);
+                const rightMissing = isNaN(rightNumber);
                 if (leftMissing || rightMissing) {
                     return leftMissing && rightMissing ? 0 : (leftMissing ? 1 : -1);
                 }
@@ -426,113 +520,319 @@ FRAME_JS = """
             }
             return direction === 'asc' ? result : -result;
         });
-        rows.forEach(function (row) { tbody.appendChild(row); });
+        rows.forEach(row => tbody.appendChild(row));
         if (emptyRow) { tbody.appendChild(emptyRow); }
     }
 
-    headers.forEach(function (th, index) {
+    headers.forEach((th, index) => {
         function activate() {
-            var direction = th.getAttribute('data-dir') === 'asc' ? 'desc' : 'asc';
-            headers.forEach(function (header) {
+            const direction = th.getAttribute('data-dir') === 'asc' ? 'desc' : 'asc';
+            headers.forEach(header => {
                 header.setAttribute('data-dir', 'none');
                 header.setAttribute('aria-sort', 'none');
-                var icon = header.querySelector('.icon');
-                icon.textContent = '\\u2195';
+                const icon = header.querySelector('.icon');
+                icon.textContent = '\u2195';
                 icon.style.opacity = '0.3';
             });
             th.setAttribute('data-dir', direction);
             th.setAttribute('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
-            var activeIcon = th.querySelector('.icon');
-            activeIcon.textContent = direction === 'asc' ? '\\u2191' : '\\u2193';
+            const activeIcon = th.querySelector('.icon');
+            activeIcon.textContent = direction === 'asc' ? '\u2191' : '\u2193';
             activeIcon.style.opacity = '1';
             sortRows(index, th.getAttribute('data-type'), direction);
         }
         th.addEventListener('click', activate);
-        th.addEventListener('keydown', function (event) {
+        th.addEventListener('keydown', event => {
             if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); }
         });
     });
 
     if (select) {
-        select.addEventListener('change', function () {
-            var option = select.options[select.selectedIndex];
+        select.addEventListener('change', () => {
+            const option = select.options[select.selectedIndex];
             sortRows(parseInt(option.value, 10), option.getAttribute('data-type'), option.getAttribute('data-dir'));
         });
     }
 
-    // Search: filters the rows in the browser (accents and case ignored). No server round trip,
-    // and the current sort order is kept.
-    function applyFilter() {
+    // ---- Filters. Everything runs in the browser: nothing is sent to the server, and the
+    // current sort order is kept. A numeric filter is a minimum: it is active once its slider
+    // leaves the lowest position, and then hides the SCPI that have no value for it.
+    const infos = (table ? $$('tr', table.tBodies[0]) : []).filter(row => row !== emptyRow).map(row => {
+        const values = {};
+        sliders.forEach(input => {
+            const column = parseInt(input.getAttribute('data-col'), 10);
+            values[column] = parseFloat(row.cells[column].getAttribute('data-sort'));
+        });
+        const list = name => (row.getAttribute(name) || '').split('|').filter(Boolean);
+        return { row: row, name: row.getAttribute('data-name') || '', values: values, sectors: list('data-sectors'), regions: list('data-regions') };
+    });
+
+    const isActive = input => !input.disabled && Number(input.value) > Number(input.min) + EPSILON;
+    const chipsOf = group => chips.filter(chip => chip.getAttribute('data-group') === group);
+    const selectedKeys = group => chipsOf(group).filter(chip => chip.getAttribute('aria-pressed') === 'true').map(chip => chip.getAttribute('data-value'));
+    const intersects = (values, wanted) => values.some(value => wanted.indexOf(value) !== -1);
+
+    function formatValue(input) {
+        const text = Number(input.value).toFixed(Number(input.getAttribute('data-decimals'))).replace('.', ',');
+        return text + (input.getAttribute('data-unit') || '');
+    }
+
+    function readState() {
+        return {
+            query: search ? normalize(search.value) : '',
+            nums: sliders.filter(isActive).map(input => ({ column: Number(input.getAttribute('data-col')), value: Number(input.value) })),
+            sectors: selectedKeys('sectors'),
+            regions: selectedKeys('regions')
+        };
+    }
+
+    // `skip` leaves one chip group out: that is how each chip gets the count it WOULD show.
+    function matches(info, state, skip) {
+        if (state.query && info.name.indexOf(state.query) === -1) { return false; }
+        for (const filter of state.nums) {
+            const value = info.values[filter.column];
+            if (isNaN(value) || value < filter.value - EPSILON) { return false; }
+        }
+        for (const group of GROUPS) {
+            if (group !== skip && state[group].length && !intersects(info[group], state[group])) { return false; }
+        }
+        return true;
+    }
+
+    function updateSlider(input) {
+        const min = Number(input.min);
+        const max = Number(input.max);
+        const percent = max > min ? ((Number(input.value) - min) / (max - min)) * 100 : 0;
+        input.style.setProperty('--fill', percent + '%');
+        const card = input.closest('.filter-card');
+        const active = isActive(input);
+        card.classList.toggle('is-active', active);
+        card.querySelector('.filter-value').textContent = active ? '\u2265 ' + formatValue(input) : 'Tous';
+    }
+
+    function renderCounter(visible) {
+        if (!counter) { return; }
+        counter.textContent = '';
+        const strong = document.createElement('strong');
+        strong.textContent = String(visible);
+        counter.appendChild(strong);
+        counter.appendChild(document.createTextNode(' SCPI affich\u00e9e' + (visible > 1 ? 's' : '') + ' sur ' + infos.length));
+    }
+
+    function renderActive() {
+        if (!activeBox) { return; }
+        activeBox.textContent = '';
+        const add = (text, attributes) => {
+            const chip = document.createElement('span');
+            chip.className = 'active-chip';
+            chip.appendChild(document.createTextNode(text));
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.textContent = '\u2715';
+            remove.setAttribute('aria-label', 'Retirer le filtre : ' + text);
+            Object.keys(attributes).forEach(name => remove.setAttribute(name, attributes[name]));
+            chip.appendChild(remove);
+            activeBox.appendChild(chip);
+        };
+        sliders.filter(isActive).forEach(input => {
+            add(input.getAttribute('data-short') + ' \u2265 ' + formatValue(input), { 'data-remove-num': input.id });
+        });
+        GROUPS.forEach(group => {
+            selectedKeys(group).forEach(key => {
+                const chip = chipsOf(group).filter(item => item.getAttribute('data-value') === key)[0];
+                add(chip ? chip.querySelector('.chip-label').textContent : key, { 'data-remove-group': group, 'data-remove-value': key });
+            });
+        });
+        if (activeBox.children.length) {
+            const reset = document.createElement('button');
+            reset.type = 'button';
+            reset.className = 'link-button';
+            reset.setAttribute('data-reset-all', '');
+            reset.textContent = 'Tout effacer';
+            activeBox.appendChild(reset);
+        }
+    }
+
+    function save() {
+        if (restoring) { return; }
+        try {
+            const nums = {};
+            sliders.filter(isActive).forEach(input => { nums[input.id] = Number(input.value); });
+            sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
+                q: search ? search.value : '',
+                open: panel ? panel.classList.contains('open') : false,
+                nums: nums,
+                sectors: selectedKeys('sectors'),
+                regions: selectedKeys('regions')
+            }));
+        } catch (error) { /* storage not available: filters are simply not remembered */ }
+    }
+
+    function applyFilters() {
         if (!table) { return; }
-        var query = search ? normalize(search.value) : '';
-        var visible = 0;
-        Array.prototype.forEach.call(table.tBodies[0].rows, function (row) {
-            if (row === emptyRow) { return; }
-            var match = !query || (row.getAttribute('data-name') || '').indexOf(query) !== -1;
-            row.hidden = !match;
-            if (match) { visible += 1; }
+        sliders.forEach(updateSlider);
+        const state = readState();
+        let visible = 0;
+        infos.forEach(info => {
+            const show = matches(info, state, null);
+            info.row.hidden = !show;
+            if (show) { visible += 1; }
         });
         if (emptyRow) { emptyRow.hidden = visible !== 0; }
+        GROUPS.forEach(group => {
+            const counts = {};
+            infos.forEach(info => {
+                if (matches(info, state, group)) { info[group].forEach(key => { counts[key] = (counts[key] || 0) + 1; }); }
+            });
+            chipsOf(group).forEach(chip => {
+                const count = counts[chip.getAttribute('data-value')] || 0;
+                chip.querySelector('.chip-count').textContent = String(count);
+                chip.classList.toggle('is-empty', count === 0);
+            });
+            const clear = $('[data-group-clear="' + group + '"]');
+            if (clear) { clear.hidden = state[group].length === 0; }
+        });
+        const activeCount = state.nums.length + state.sectors.length + state.regions.length;
+        if (badge) { badge.textContent = String(activeCount); badge.hidden = activeCount === 0; }
+        const emptyReset = document.getElementById('empty-reset');
+        if (emptyReset) { emptyReset.hidden = activeCount === 0; }
         if (clearButton) { clearButton.hidden = !(search && search.value); }
+        if (doneButton) {
+            doneButton.textContent = visible ? 'Voir les ' + visible + ' SCPI' : 'Aucune SCPI : modifier les filtres';
+        }
+        renderCounter(visible);
+        renderActive();
+        save();
         fitHeight();
     }
-    if (search) { search.addEventListener('input', applyFilter); }
+
+    function setPanel(open) {
+        if (!panel || !toggle) { return; }
+        panel.classList.toggle('open', open);
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        save();
+        fitHeight();
+    }
+
+    function resetAll() {
+        sliders.forEach(input => { input.value = input.min; });
+        chips.forEach(chip => chip.setAttribute('aria-pressed', 'false'));
+        applyFilters();
+    }
+
+    function restore() {
+        let saved = null;
+        try { saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || 'null'); } catch (error) { saved = null; }
+        if (!saved || typeof saved !== 'object') { return; }
+        if (search && typeof saved.q === 'string') { search.value = saved.q.slice(0, 80); }
+        sliders.forEach(input => {
+            const value = saved.nums && saved.nums[input.id];
+            if (!input.disabled && typeof value === 'number') { input.value = String(value); }
+        });
+        GROUPS.forEach(group => {
+            const wanted = Array.isArray(saved[group]) ? saved[group] : [];
+            chipsOf(group).forEach(chip => {
+                chip.setAttribute('aria-pressed', wanted.indexOf(chip.getAttribute('data-value')) !== -1 ? 'true' : 'false');
+            });
+        });
+        if (saved.open) { setPanel(true); }
+    }
+
+    sliders.forEach(input => input.addEventListener('input', applyFilters));
+    if (search) { search.addEventListener('input', applyFilters); }
     if (clearButton) {
-        clearButton.addEventListener('click', function () {
+        clearButton.addEventListener('click', () => {
             search.value = '';
-            applyFilter();
+            applyFilters();
             search.focus();
         });
     }
 
-    viewButtons.forEach(function (button) {
-        button.addEventListener('click', function () {
-            var view = button.getAttribute('data-view');
+    viewButtons.forEach(button => {
+        button.addEventListener('click', () => {
+            const view = button.getAttribute('data-view');
             app.classList.toggle('view-cards', view === 'cards');
             app.classList.toggle('view-table', view === 'table');
-            viewButtons.forEach(function (other) {
-                other.setAttribute('aria-pressed', other === button ? 'true' : 'false');
-            });
+            viewButtons.forEach(other => other.setAttribute('aria-pressed', other === button ? 'true' : 'false'));
             fitHeight();
         });
     });
 
+    // ---- SCPI detail sheet
     function showDetail(id, scroll) {
-        Array.prototype.forEach.call(document.querySelectorAll('.detail'), function (detail) {
-            detail.hidden = detail.getAttribute('data-id') !== id;
-        });
+        $$('.detail').forEach(detail => { detail.hidden = detail.getAttribute('data-id') !== id; });
         app.classList.add('show-detail');
         fitHeight();
-        var shown = document.querySelector('.detail:not([hidden])');
+        const shown = $('.detail:not([hidden])');
         if (shown && scroll) { scrollTo(shown, 'start'); }
     }
 
     function showList() {
-        Array.prototype.forEach.call(document.querySelectorAll('.detail'), function (detail) {
-            detail.hidden = true;
-        });
+        $$('.detail').forEach(detail => { detail.hidden = true; });
         app.classList.remove('show-detail');
         fitHeight();
         if (lastOpener) { scrollTo(lastOpener, 'center'); }
     }
 
-    document.addEventListener('click', function (event) {
-        var opener = event.target.closest('[data-open]');
+    document.addEventListener('click', event => {
+        const target = event.target;
+        if (!target || !target.closest) { return; }
+        const opener = target.closest('[data-open]');
         if (opener) {
             event.preventDefault();
             lastOpener = opener;
             showDetail(opener.getAttribute('data-open'), true);
             return;
         }
-        if (event.target.closest('[data-back]')) {
-            showList();
+        if (target.closest('[data-back]')) { showList(); return; }
+        if (target.closest('#filters-toggle')) { setPanel(!panel.classList.contains('open')); return; }
+        if (target.closest('#filters-done')) { setPanel(false); scrollTo($('.toolbar'), 'start'); return; }
+        const chip = target.closest('.chip[data-group]');
+        if (chip) {
+            chip.setAttribute('aria-pressed', chip.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+            applyFilters();
+            return;
         }
+        const removeNumber = target.closest('[data-remove-num]');
+        if (removeNumber) {
+            const input = document.getElementById(removeNumber.getAttribute('data-remove-num'));
+            if (input) { input.value = input.min; }
+            applyFilters();
+            return;
+        }
+        const removeChip = target.closest('[data-remove-group]');
+        if (removeChip) {
+            chipsOf(removeChip.getAttribute('data-remove-group')).forEach(item => {
+                if (item.getAttribute('data-value') === removeChip.getAttribute('data-remove-value')) { item.setAttribute('aria-pressed', 'false'); }
+            });
+            applyFilters();
+            return;
+        }
+        const clearGroup = target.closest('[data-group-clear]');
+        if (clearGroup) {
+            chipsOf(clearGroup.getAttribute('data-group-clear')).forEach(item => item.setAttribute('aria-pressed', 'false'));
+            applyFilters();
+            return;
+        }
+        const more = target.closest('[data-group-more]');
+        if (more) {
+            const box = $('.chip-group[data-group="' + more.getAttribute('data-group-more') + '"]');
+            const collapsed = box.classList.toggle('collapsed');
+            more.textContent = collapsed ? more.getAttribute('data-more-label') : 'R\u00e9duire';
+            fitHeight();
+            return;
+        }
+        if (target.closest('[data-reset-all]')) { resetAll(); }
     });
 
     if (window.ResizeObserver && app) { new ResizeObserver(fitHeight).observe(app); }
     window.addEventListener('load', fitHeight);
 
-    var initial = app.getAttribute('data-initial');
+    restore();
+    restoring = false;
+    applyFilters();
+
+    const initial = app.getAttribute('data-initial');
     if (initial) { showDetail(initial, false); }
     fitHeight();
 })();
@@ -720,6 +1020,142 @@ def handle_profile_change(widget_key: str) -> None:
         st.session_state[PROFILE_VALUE_KEY] = value
 
 
+# ---- Filters ---------------------------------------------------------------------
+# The filters panel is rendered once per profile (it depends on the data) and works entirely in
+# the frame: see FRAME_JS. The table column indexes below must match TABLE_HEADERS.
+
+MULTI_VALUE_SEPARATORS = re.compile(r"[,;·•|]")
+FILTER_CHIP_LIMIT = 12  # chips shown before the "see more" button
+NBSP = "\u00a0"
+# (key, label, short label, table column, unit, step). Each is a "minimum" filter.
+FILTER_SLIDERS = (
+    ("score", "Note min", "Note", 2, "", 1.0),
+    ("discount", "Décote min", "Décote", 3, f"{NBSP}%", 0.1),
+    ("tri", "TRI min", "TRI", 5, f"{NBSP}%", 0.1),
+    ("pga", "PGA min", "PGA", 4, f"{NBSP}%", 0.1),
+    ("tri_np", "TRI Max Nue-Propriété min", "TRI Max NP", 8, f"{NBSP}%", 0.1),
+    ("duree_np", "Durée TRI Max Nue-Propriété min", "Durée TRI Max NP", 9, f"{NBSP}ans", 1.0),
+)
+FILTER_ICON = (
+    "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' "
+    "stroke-linejoin='round' aria-hidden='true'><path d='M3 5h18l-7 8.5V19l-4 2v-7.5z'/></svg>"
+)
+
+
+def split_multi_values(text: Any) -> list[tuple[str, str]]:
+    """(label, key) of every value of a "A, B · C" cell; key ignores case and accents."""
+    values: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for part in MULTI_VALUE_SEPARATORS.split(str(text or "")):
+        label = " ".join(part.split())
+        if not label or is_missing_value(label):
+            continue
+        key = text_key(label)
+        if key not in seen:
+            seen.add(key)
+            values.append((label, key))
+    return values
+
+
+def _filter_value(item: dict[str, Any], profile: str, key: str) -> float | None:
+    """The number a minimum filter compares; the same one the table column sorts on."""
+    if key == "score":
+        return item["profile_scores"].get(profile)
+    field = {
+        "discount": "discount",
+        "tri": "tri",
+        "pga": "pga",
+        "tri_np": "tri_demembrement",
+        "duree_np": "duree_tri_demembrement",
+    }[key]
+    return parse_number(item.get(field))
+
+
+def build_filter_card(
+    key: str, label: str, short: str, column: int, unit: str, step: float, values: list[float]
+) -> str:
+    """One minimum slider; disabled when the sheet gives no usable range for it."""
+    decimals = 0 if step >= 1 else 1
+    count = len(values)
+    low = high = 0.0
+    if values:
+        low = round(math.floor(min(values) / step + 1e-9) * step, 6)
+        high = round(math.ceil(max(values) / step - 1e-9) * step, 6)
+    usable = bool(values) and high > low
+    if usable:
+        hint = f"{count} SCPI renseignée{'s' if count > 1 else ''}"
+        scale = f"<span>{low:.{decimals}f}</span><span>{high:.{decimals}f}</span>".replace(".", ",")
+        bounds = f"min='{low:.{decimals}f}' max='{high:.{decimals}f}' step='{step:g}' value='{low:.{decimals}f}'"
+    else:
+        hint = "Aucune donnée dans la feuille" if not values else f"Valeur unique pour les {count} SCPI renseignées"
+        scale = "<span>&nbsp;</span>"
+        bounds = "min='0' max='1' step='1' value='0' disabled"
+    card_id = f"filter-{key}"
+    return (
+        f"<div class='filter-card{'' if usable else ' is-disabled'}'>"
+        f"<div class='filter-card-top'><label id='{card_id}-label' for='{card_id}'>{html.escape(label)}</label>"
+        "<span class='filter-value'>Tous</span></div>"
+        f"<input type='range' id='{card_id}' data-num data-col='{column}' data-short='{html.escape(short, quote=True)}' "
+        f"data-unit='{html.escape(unit, quote=True)}' data-decimals='{decimals}' {bounds} aria-labelledby='{card_id}-label'>"
+        f"<div class='filter-card-scale'>{scale}</div>"
+        f"<div class='filter-card-hint'>{hint}</div></div>"
+    )
+
+
+def build_chip_group(group: str, title: str, items: list[dict[str, Any]], field: str) -> str:
+    """Multi-select chips for the distinct values of a "A, B" column, most frequent first."""
+    counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for item in items:
+        for label, key in split_multi_values(item.get(field)):
+            counts[key] = counts.get(key, 0) + 1
+            labels.setdefault(key, label)
+    ordered = sorted(counts, key=lambda key: (-counts[key], key))
+    hidden_count = len(ordered) - FILTER_CHIP_LIMIT
+    if not ordered:
+        body = "<div class='filter-card-hint'>Aucune donnée dans la feuille.</div>"
+    else:
+        chips = "".join(
+            f"<button type='button' class='chip' data-group='{group}' data-value='{html.escape(key, quote=True)}' "
+            f"aria-pressed='false'><span class='chip-label'>{html.escape(labels[key])}</span>"
+            f"<span class='chip-count'>{counts[key]}</span></button>"
+            for key in ordered
+        )
+        body = f"<div class='chip-group{' collapsed' if hidden_count > 0 else ''}' data-group='{group}'>{chips}</div>"
+        if hidden_count > 0:
+            label = f"Voir les {hidden_count} autres"
+            body += f"<button type='button' class='link-button' data-group-more='{group}' data-more-label='{label}'>{label}</button>"
+    return (
+        "<div class='filter-group'><div class='filter-group-top'>"
+        f"<span class='filter-group-title'>{html.escape(title)}</span>"
+        f"<button type='button' class='link-button' data-group-clear='{group}' hidden>Effacer</button></div>"
+        f"{body}</div>"
+    )
+
+
+def build_filters_panel(items: list[dict[str, Any]], profile: str) -> str:
+    cards = "".join(
+        build_filter_card(
+            key, label, short, column, unit, step,
+            [value for item in items if (value := _filter_value(item, profile, key)) is not None],
+        )
+        for key, label, short, column, unit, step in FILTER_SLIDERS
+    )
+    return (
+        "<div class='filters-panel' id='filters-panel'><div class='filters-inner'><div class='filters-body'>"
+        "<div class='filters-head'><div><div class='filters-title'>Affiner le classement</div>"
+        "<div class='filters-sub'>Les filtres se combinent. Un filtre « min » masque les SCPI sans donnée.</div></div>"
+        "<button type='button' class='link-button' data-reset-all>Tout réinitialiser</button></div>"
+        f"<div class='filters-grid'>{cards}</div>"
+        "<div class='filters-groups'>"
+        f"{build_chip_group('sectors', 'Secteurs majoritaires', items, 'main_sectors')}"
+        f"{build_chip_group('regions', 'Régions majoritaires', items, 'main_regions')}"
+        "</div>"
+        "<button type='button' class='filters-done' id='filters-done'>Voir les résultats</button>"
+        "</div></div></div>"
+    )
+
+
 # ---- Ranking frame builders ---------------------------------------------------
 
 def _sort_attribute(sort_value: float | None) -> str:
@@ -789,7 +1225,14 @@ def render_row(item: dict[str, Any], profile: str) -> str:
         cell_badge("Bonus Louve (cashback)", display_percent(item.get("bonus_louve", "")), safe_float(item.get("bonus_louve"))),
     ]
     # data-name: normalized name used by the in-frame search (accents and case ignored).
-    return f"<tr data-name='{html.escape(text_key(name), quote=True)}'>" + "".join(cells) + "</tr>"
+    # data-sectors / data-regions: normalized values used by the chip filters.
+    sectors = html.escape("|".join(key for _, key in split_multi_values(item.get("main_sectors"))), quote=True)
+    regions = html.escape("|".join(key for _, key in split_multi_values(item.get("main_regions"))), quote=True)
+    return (
+        f"<tr data-name='{html.escape(text_key(name), quote=True)}' data-sectors='{sectors}' data-regions='{regions}'>"
+        + "".join(cells)
+        + "</tr>"
+    )
 
 
 def render_detail(item: dict[str, Any], profile: str) -> str:
@@ -840,9 +1283,12 @@ def build_mobile_select() -> str:
 
 
 def build_toolbar() -> str:
-    """Search field, plus the cards / table switch (only visible on narrow screens)."""
+    """Filters button, search field, plus the cards / table switch (only visible on narrow screens)."""
     return (
         "<div class='toolbar'>"
+        "<button type='button' class='filters-button' id='filters-toggle' aria-expanded='false' "
+        "aria-controls='filters-panel'>"
+        f"{FILTER_ICON}<span>Filtres</span><span class='filters-badge' id='filters-badge' hidden>0</span></button>"
         "<div class='view-toggle' role='group' aria-label='Affichage'>"
         f"<button type='button' data-view='cards' aria-pressed='true'>{VIEW_CARDS_LABEL}</button>"
         f"<button type='button' data-view='table' aria-pressed='false'>{VIEW_TABLE_LABEL}</button>"
@@ -855,9 +1301,18 @@ def build_toolbar() -> str:
     )
 
 
+def build_summary() -> str:
+    """Live result counter and the removable chips of the active filters (filled by FRAME_JS)."""
+    return (
+        "<div class='filters-summary'><span id='result-count' aria-live='polite'></span>"
+        "<div class='active-filters' id='active-filters'></div></div>"
+    )
+
+
 def build_ranking_document(
     rows_html: list[str],
     details_html: str,
+    filters_html: str,
     *,
     theme: str,
     initial_detail_id: str | None,
@@ -870,7 +1325,8 @@ def build_ranking_document(
     )
     empty_row = (
         f"<tr id='empty-row'{' hidden' if rows_html else ''}>"
-        f"<td colspan='{len(TABLE_HEADERS)}' class='empty'>Aucune SCPI ne correspond à votre recherche.</td></tr>"
+        f"<td colspan='{len(TABLE_HEADERS)}' class='empty'>Aucune SCPI ne correspond à votre recherche ou à vos filtres.<br>"
+        "<button type='button' class='link-button' id='empty-reset' data-reset-all hidden>Réinitialiser les filtres</button></td></tr>"
     )
     initial = html.escape(initial_detail_id or "", quote=True)
     detail_class = " show-detail" if initial_detail_id else ""
@@ -882,7 +1338,7 @@ def build_ranking_document(
         f"<body class='{theme}'>"
         f"<div class='app view-cards{detail_class}' data-initial='{initial}'>"
         "<div class='list'>"
-        f"{build_toolbar()}{build_mobile_select()}"
+        f"{build_toolbar()}{filters_html}{build_summary()}{build_mobile_select()}"
         "<div class='scroll'><table class='ranking-table' id='ranking'>"
         f"<thead><tr>{header_cells}</tr></thead>"
         f"<tbody>{''.join(rows_html)}{empty_row}</tbody>"
@@ -896,6 +1352,7 @@ def build_ranking_document(
 def render_ranking_frame(
     rows_html: list[str],
     details_html: str,
+    filters_html: str,
     *,
     theme: str,
     initial_detail_id: str | None,
@@ -903,6 +1360,7 @@ def render_ranking_frame(
     document = build_ranking_document(
         rows_html,
         details_html,
+        filters_html,
         theme=theme,
         initial_detail_id=initial_detail_id,
     )
@@ -937,6 +1395,7 @@ def build_profile_view(version: int, profile: str, _data: dict[str, list[dict[st
         "rows_html": [render_row(item, profile) for item in rankings],
         "ids": frozenset(item["scpi_id"] for item in rankings),
         "details_html": "".join(render_detail(item, profile) for item in rankings),
+        "filters_html": build_filters_panel(rankings, profile),
         "warnings": validate_scores(_data) + validate_join(_data),
     }
 
@@ -1007,7 +1466,7 @@ def render_footer() -> None:
         "Les données publiques de marché utilisées proviennent notamment de [Louve Invest](https://www.louveinvest.com/scpi/liste-scpi).\n\n"
         "**Avertissement de responsabilité :** Cet outil est un support quantitatif d'analyse et de décision fondé sur des données publiques et des modèles mathématiques de pondération pour calculer des scores et établir un classement. "
         "Il ne constitue en aucun cas un conseil en investissement ni une activité de démarchage financier au sens de la réglementation de l'AMF. "
-        "Il n'a pas vocation à fournir un conseil personnalisé. Les performances passées ne préjugent pas des performances futures."
+        "Il n'a pas vocation à fournir un conseil personnalisé. Investir comporte des risques, notamment de perte en capital. Les performances passées ne préjugent pas des performances futures."
     )
 
 
@@ -1083,7 +1542,7 @@ with profile_column:
         wrap=True,
     )
 
-view: dict[str, Any] = {"rows_html": [], "ids": frozenset(), "details_html": "", "warnings": []}
+view: dict[str, Any] = {"rows_html": [], "ids": frozenset(), "details_html": "", "filters_html": "", "warnings": []}
 if not load_error:
     try:
         view = build_profile_view(data_version, profile, data)
@@ -1138,6 +1597,7 @@ st.markdown(
 render_ranking_frame(
     view["rows_html"],
     view["details_html"],
+    view["filters_html"],
     theme=current_theme(),
     initial_detail_id=initial_detail_id,
 )
