@@ -1461,8 +1461,13 @@ st.markdown(
 def render_footer() -> None:
     """Render the license and liability notice."""
     version_data = VERSION_STORE.get().value
-    data_date = version_data[0][1].split()[1]
-    tool_date = version_data[1][1]
+    data_date = tool_date = "inconnue"
+    try:
+        data_date = version_data[0][1].split()[1]
+        tool_date = version_data[1][1]
+    except Exception:
+        logger.exception("Unexpected error while loading the tool and data dates")
+        st.error("Les dates d'outil et version ne peuvent être affichées.")
     st.markdown(
         "**Licence Open Source (GNU GPL v3) :** Cet outil ([code source](https://github.com/thibaut-probst/scpiscreen) et [formules de calcul](https://docs.google.com/spreadsheets/d/10RwJl0A2dvoHjY6LmOFQvT7nghF3-n73hf-Aa9FJBtE/)) est distribué sous licence libre GNU GPL v3. "
         "Toute redistribution doit respecter les termes de la GPL v3 (code source accessible, mention des modifications, conservation des mentions de droits d’auteur). "
