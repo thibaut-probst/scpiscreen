@@ -1460,13 +1460,15 @@ st.markdown(
 def render_footer() -> None:
     """Render the license and liability notice."""
     st.markdown(
-        "**Licence Open Source (GNU GPL v3) :** Cet outil est distribué sous licence libre GNU GPL v3. "
+        "**Licence Open Source (GNU GPL v3) :** Cet outil (code source et formules de calcul) est distribué sous licence libre GNU GPL v3. "
         "Toute redistribution de ce projet ou de ses œuvres dérivées doit être effectuée sous cette même licence, "
         "conserver l'accès libre au code source et aux formules, et maintenir les crédits d'origine. "
-        "Les données publiques de marché utilisées proviennent notamment de [Louve Invest](https://www.louveinvest.com/scpi/liste-scpi).\n\n"
-        "**Avertissement de responsabilité :** Cet outil est un support quantitatif d'analyse et de décision fondé sur des données publiques et des modèles mathématiques de pondération pour calculer des scores et établir un classement. "
-        "Il ne constitue en aucun cas un conseil en investissement ni une activité de démarchage financier au sens de la réglementation de l'AMF. "
-        "Il n'a pas vocation à fournir un conseil personnalisé. Investir comporte des risques, notamment de perte en capital. Les performances passées ne préjugent pas des performances futures."
+        "Les données publiques de marché utilisées proviennent de la [base de données publique](https://docs.google.com/spreadsheets/d/1McJtTdsId_xjdpAV7WQbj6COlz5yCOOIiJsIj45tpcU/) de [Louve Invest](https://www.louveinvest.com/scpi/liste-scpi), réutilisée conformémment aux conditions d'utilisation communiquées par son éditeur. Les scores, pondérations, indicateurs complémentaires et classements sont des créations indépendantes."
+        "Cet outil est indépendant de Louve Invest et ne constitue ni un service officiel ni un partenariat avec cette société.\n\n"
+        "**Avertissement de responsabilité :** Cet outil est un support quantitatif d'analyse et de décision fondé sur des données publiques et des modèles mathématiques de pondération pour calculer des scores et établir des classements selon une méthodologie propre à l'application. "
+        "Les scores et classements sont fournis à titre exclusivement informatif. Cela ne constitue en aucun cas un conseil en investissement ni une activité de démarchage financier au sens de la réglementation de l'AMF. Il n'a donc pas vocation à fournir un conseil personnalisé. "
+        "Malgré le soin apporté aux calculs, aucune garantie n'est donnée quant à l'exhaustivité ou à l'exactitude des informations présentées. "
+        "Investir en SCPI comporte des risques, notamment de perte en capital. Les performances passées ne préjugent pas des performances futures."
     )
 
 
