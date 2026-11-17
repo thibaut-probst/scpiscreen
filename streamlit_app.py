@@ -10,6 +10,7 @@ import streamlit as st
 
 from access_gate import require_access
 from html_frame import render_html_frame
+from legal_pages import render_legal_links
 from method_page import build_method_page_html
 from scpi_data import (
     CATEGORY_ORDER,
@@ -132,6 +133,8 @@ st.markdown(
     .st-key-profile_pills { display: none !important; }
     [data-testid="stPills"] button { min-height: 2.6rem; font-weight: 600; }
     .st-key-cookie_setter, .st-key-handoff_probe { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .st-key-legal_links { margin-top: .4rem; }
+    .st-key-legal_links [data-testid="stButton"] button { min-height: 2rem; padding: 0 .2rem; font-size: .82rem; text-decoration: underline; text-underline-offset: 3px; }
 
     /* Method page */
     .method-intro { max-width: 52rem; margin: .2rem 0 1.2rem; color: var(--muted); font-size: .98rem; line-height: 1.6; }
@@ -1477,9 +1480,10 @@ def render_footer() -> None:
         "Les scores et classements sont fournis à titre exclusivement informatif. Cela ne constitue en aucun cas un conseil en investissement ni une activité de démarchage financier au sens de la réglementation de l'AMF. Il n'a donc pas vocation à fournir un conseil personnalisé. "
         "Malgré le soin apporté aux calculs, aucune garantie n'est donnée quant à l'exhaustivité ou à l'exactitude des informations présentées. "
         "Investir en SCPI comporte des risques, notamment de perte en capital. Les performances passées ne préjugent pas des performances futures.\n\n"
-        f"Dernière mise à jour de l'outil : {data_date}.\n\n"
-        f"Dernière mise à jour des données : {tool_date}."
+        f"Dernière mise à jour de l'outil : {tool_date}.\n\n"
+        f"Dernière mise à jour des données : {data_date}."
     )
+    render_legal_links()
 
 
 def render_method_page() -> None:
