@@ -354,7 +354,11 @@ def _handoff_probe_script(cookie_names: tuple[str, ...] = AUTH_COOKIE_NAMES) -> 
         "style.textContent='[data-testid=\"stMain\"]{visibility:hidden}';"
         "doc.head.appendChild(style);"
         "url.searchParams.set(" + json.dumps(HANDOFF_PARAM) + ",token);"
-        "loc.replace(url.toString());"
+        "setTimeout(function(){try{style.remove();}catch(e){}},4000);"
+        "url.searchParams.set(" + json.dumps(HANDOFF_PARAM) + ",token);"
+        "var nav=doc.createElement('script');"
+        "nav.textContent='window.location.replace('+JSON.stringify(url.toString())+')';"
+        "doc.head.appendChild(nav);"
         "}catch(e){/* the login form stays usable */}"
         "})();</script>"
     )
