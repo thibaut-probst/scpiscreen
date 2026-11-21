@@ -28,7 +28,7 @@ logger = logging.getLogger("scpiscreen")
 ACCESS_CODE_ENV = "SCPISCREEN_ACCESS_CODE"
 INSECURE_HTTP_ENV = "SCPISCREEN_ALLOW_INSECURE_HTTP"
 # The __Host- prefix makes browsers accept the cookie only if it is Secure, has Path=/ and no Domain.
-AUTH_COOKIE_NAME = "__Host-scpiscreen_access"
+AUTH_COOKIE_NAME = "scpiscreen_access"
 # Over plain HTTP (a local run on http://localhost) Firefox and Safari refuse Secure and __Host-
 # cookies, so a plain cookie is used there. Both names are read; HTTPS deployments never use it.
 PLAIN_COOKIE_NAME = "scpiscreen_access"
